@@ -100,3 +100,18 @@ def pages_to_pngs(pages: list[bytes], scale: float = 2.0) -> list[bytes]:
         pdf = os.path.join(td, "notebook.pdf")
         pages_to_pdf(pages, pdf)
         return pdf_to_pngs(pdf, scale=scale)
+
+
+def pages_to_png_files(pages: list[bytes], out_dir: str, scale: float = 2.0) -> list[str]:
+    """Render ``.rm`` pages to ``page-NN.png`` files under ``out_dir``.
+
+    Returns the ordered file paths. Used to hand the note to the agent broker,
+    whose vision provider reads image *files* (in its working directory).
+    """
+    paths: list[str] = []
+    for i, data in enumerate(pages_to_pngs(pages, scale=scale), 1):
+        p = os.path.join(out_dir, f"page-{i:02d}.png")
+        with open(p, "wb") as f:
+            f.write(data)
+        paths.append(p)
+    return paths

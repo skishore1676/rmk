@@ -1,12 +1,14 @@
 """Configuration loading for rmk.
 
 Config lives at ``~/.config/rmk/config.toml`` (via platformdirs). Environment
-variables override the file so secrets never have to be written to disk:
+variables override the file:
 
-    ANTHROPIC_API_KEY   the Claude API key (never stored in the config file)
     RMK_SSH_HOST        override [ssh].host
     RMK_SSH_PASSWORD    override [ssh].password
-    RMK_MODEL           override [llm].model
+    RMK_MODEL           override [broker].model
+
+The LLM is reached through the agent broker, whose ``claude`` provider uses the
+logged-in ``claude`` CLI — so there is no API key to store here.
 """
 
 from __future__ import annotations
@@ -20,7 +22,6 @@ import platformdirs
 
 # Where handwritten notebooks live on a reMarkable 2 (xochitl store).
 DEFAULT_XOCHITL_ROOT = "/home/root/.local/share/remarkable/xochitl"
-DEFAULT_MODEL = "claude-opus-4-8"
 
 
 def config_path() -> Path:
@@ -37,16 +38,24 @@ class SSHConfig:
 
 
 @dataclass
-class LLMConfig:
-    model: str = DEFAULT_MODEL
-    api_key: str | None = None  # falls back to ANTHROPIC_API_KEY env var
-    max_tokens: int = 16000
+class BrokerConfig:
+    """How rmk hires a brain via ~/code/agent-broker."""
+
+    provider: str = "claude"  # provider id for the explicit-binding path
+    model: str = "sonnet"  # broker/claude CLI model alias (e.g. sonnet, opus)
+    timeout: int = 600
+    # Optional: point at a broker policy file to use your configured provider
+    # chain (failover + receipts) instead of a single explicit binding.
+    policy_path: str | None = None
+    actor: str = "reader"
+    role: str = "note_reader"
+    lane: str = "rmk"
 
 
 @dataclass
 class Config:
     ssh: SSHConfig = field(default_factory=SSHConfig)
-    llm: LLMConfig = field(default_factory=LLMConfig)
+    broker: BrokerConfig = field(default_factory=BrokerConfig)
     root: str = DEFAULT_XOCHITL_ROOT
 
     @classmethod
@@ -56,19 +65,18 @@ class Config:
         if path.exists():
             data = tomllib.loads(path.read_text())
             _apply(cfg.ssh, data.get("ssh", {}))
-            _apply(cfg.llm, data.get("llm", {}))
+            _apply(cfg.broker, data.get("broker", {}))
             rm = data.get("remarkable", {})
             if "root" in rm:
                 cfg.root = rm["root"]
 
         # Environment overrides (secrets and quick tweaks).
-        cfg.llm.api_key = os.environ.get("ANTHROPIC_API_KEY", cfg.llm.api_key)
         if v := os.environ.get("RMK_SSH_HOST"):
             cfg.ssh.host = v
         if v := os.environ.get("RMK_SSH_PASSWORD"):
             cfg.ssh.password = v
         if v := os.environ.get("RMK_MODEL"):
-            cfg.llm.model = v
+            cfg.broker.model = v
         return cfg
 
 
@@ -88,15 +96,21 @@ user = "root"
 port = 22
 # The SSH password is shown ON THE TABLET at:
 #   Settings -> Help -> Copyrights and licenses  (the "GPLv3 Compliance" screen)
-# It looks like a short random string. Paste it here, OR set up key auth and
-# use key_path instead (then you can delete the password line).
+# Paste it here, OR set up key auth and use key_path instead.
 password = ""
 # key_path = "~/.ssh/id_rsa"
 
-[llm]
-model = "claude-opus-4-8"
-max_tokens = 16000
-# The API key is read from the ANTHROPIC_API_KEY environment variable.
+[broker]
+# The brain: rmk routes the note through ~/code/agent-broker, which runs the
+# logged-in `claude` CLI (no API key needed — just `claude auth status` = ok).
+provider = "claude"
+model = "sonnet"          # try "opus" for messier handwriting
+timeout = 600
+# To use your own broker policy chain (failover + receipts) instead of a single
+# claude binding, point at a policy file and set the actor/role:
+# policy_path = "/Users/suman/code/agent-broker/policies/your_policy.yaml"
+# actor = "reader"
+# role  = "note_reader"
 
 [remarkable]
 root = "/home/root/.local/share/remarkable/xochitl"

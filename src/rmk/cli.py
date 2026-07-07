@@ -1,16 +1,18 @@
 """rmk command-line interface.
 
     rmk init                 write a starter config file
-    rmk doctor               check config, SSH, renderer, and API key
+    rmk doctor               check config, SSH, renderer, and the broker
     rmk ls [--tree]          list notebooks on the tablet
     rmk pull NAME -o out.pdf render a notebook to a local PDF
-    rmk ask  NAME "..."      ask Claude anything about a notebook
+    rmk ask  NAME "..."      ask the broker anything about a notebook
     rmk summary NAME         summarise a notebook
     rmk diagram NAME         turn a notebook into a Mermaid flow diagram
 """
 
 from __future__ import annotations
 
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 import typer
@@ -24,7 +26,7 @@ from .transport import SSHTransport
 
 app = typer.Typer(
     add_completion=False,
-    help="Bridge your reMarkable tablet to an LLM: pull a note, push it to Claude.",
+    help="Bridge your reMarkable tablet to an LLM: pull a note, push it to the broker.",
     no_args_is_help=True,
 )
 console = Console()
@@ -42,27 +44,30 @@ def _transport(cfg: Config) -> SSHTransport:
     )
 
 
-def _library(cfg: Config, transport: SSHTransport) -> Library:
-    return Library(transport, cfg.root)
-
-
 def _fatal(msg: str) -> None:
     err.print(f"[bold red]error:[/] {msg}")
     raise typer.Exit(1)
 
 
-def _render_pngs(cfg: Config, name: str) -> tuple[str, list[bytes]]:
-    """Resolve a notebook, pull its pages, and rasterise to PNG. Returns
-    (path, pngs)."""
-    with _transport(cfg) as t:
-        lib = _library(cfg, t)
-        try:
+@contextmanager
+def _rendered_note(cfg: Config, name: str):
+    """Resolve a notebook, pull its pages, render to PNG files in a temp dir.
+
+    Yields ``(note_path, image_paths, working_dir)``. The temp dir (and its PNGs)
+    stays alive for the duration of the ``with`` block so the broker can read it.
+    """
+    try:
+        with _transport(cfg) as t:
+            lib = Library(t, cfg.root)
             doc = lib.resolve(name)
-        except LookupError as e:
-            _fatal(str(e))
-        path = lib.path_of(doc.uuid)
-        console.print(f"Pulling [bold]{path}[/] …")
-        pages = lib.read_pages(doc.uuid)
+            path = lib.path_of(doc.uuid)
+            console.print(f"Pulling [bold]{path}[/] …")
+            pages = lib.read_pages(doc.uuid)
+    except LookupError as e:
+        _fatal(str(e))
+    except Exception as e:  # noqa: BLE001
+        _fatal(str(e))
+
     if not pages:
         _fatal(f"{path!r} has no handwritten pages to render.")
     if len(pages) > llm.MAX_PAGES:
@@ -71,8 +76,32 @@ def _render_pngs(cfg: Config, name: str) -> tuple[str, list[bytes]]:
             f"{llm.MAX_PAGES} to the model."
         )
         pages = pages[: llm.MAX_PAGES]
-    console.print(f"Rendering {len(pages)} page(s) …")
-    return path, render.pages_to_pngs(pages)
+
+    with tempfile.TemporaryDirectory(prefix="rmk-") as td:
+        console.print(f"Rendering {len(pages)} page(s) …")
+        try:
+            paths = render.pages_to_png_files(pages, td)
+        except render.RenderError as e:
+            _fatal(str(e))
+        yield path, paths, td
+
+
+def _brain(cfg: Config, image_paths: list[str], working_dir: str, prompt: str) -> str:
+    try:
+        return llm.ask(
+            image_paths,
+            prompt,
+            working_dir=working_dir,
+            provider=cfg.broker.provider,
+            model=cfg.broker.model,
+            timeout=cfg.broker.timeout,
+            policy_path=cfg.broker.policy_path,
+            actor=cfg.broker.actor,
+            role=cfg.broker.role,
+            lane=cfg.broker.lane,
+        )
+    except llm.LLMError as e:
+        _fatal(str(e))
 
 
 # -- commands ----------------------------------------------------------------
@@ -86,14 +115,14 @@ def init(force: bool = typer.Option(False, help="Overwrite an existing config.")
     path.write_text(CONFIG_TEMPLATE)
     console.print(f"Wrote config to [bold]{path}[/].")
     console.print(
-        "Now set the SSH password (Settings -> Help -> Copyrights and licenses "
-        "on the tablet) and export ANTHROPIC_API_KEY, then run [bold]rmk doctor[/]."
+        "Set the SSH password (Settings -> Help -> Copyrights and licenses on the "
+        "tablet), make sure `claude` is logged in, then run [bold]rmk doctor[/]."
     )
 
 
 @app.command()
 def doctor() -> None:
-    """Check config, SSH connectivity, the renderer, and the API key."""
+    """Check config, SSH connectivity, the renderer, and the broker."""
     cfg = Config.load()
     ok = True
 
@@ -103,7 +132,7 @@ def doctor() -> None:
         f"({path})"
     )
 
-    # Renderer availability.
+    # Renderer.
     try:
         render._rmc_bin()
         console.print("renderer (rmc): [green]ok[/]")
@@ -111,20 +140,31 @@ def doctor() -> None:
         ok = False
         console.print(f"renderer (rmc): [red]missing[/] — {e}")
 
-    # API key.
-    if cfg.llm.api_key:
-        console.print("ANTHROPIC_API_KEY: [green]set[/]")
-    else:
+    # Broker + claude CLI (the brain).
+    try:
+        from agent_broker.providers.claude import find_claude_binary
+
+        binary = find_claude_binary()
+        if binary:
+            console.print(f"broker + claude CLI: [green]ok[/] ({binary})")
+            console.print("  [dim](verify auth with `claude auth status`)[/]")
+        else:
+            ok = False
+            console.print(
+                "broker: [green]imported[/], but the `claude` CLI was [red]not found[/]. "
+                "Install/log in to Claude Code."
+            )
+    except Exception as e:  # noqa: BLE001
+        ok = False
         console.print(
-            "ANTHROPIC_API_KEY: [yellow]not set[/] "
-            "(needed for ask/summary/diagram, not for ls/pull)"
+            f"broker (agent-broker): [red]not importable[/] — {e}\n"
+            "  Is agent-broker installed? (`uv sync` in the rmk repo.)"
         )
 
     # SSH + a real read.
     try:
         with _transport(cfg) as t:
-            lib = _library(cfg, t)
-            docs = lib.documents()
+            docs = Library(t, cfg.root).documents()
         console.print(
             f"tablet SSH ({cfg.ssh.user}@{cfg.ssh.host}): [green]ok[/] "
             f"— {len(docs)} notebook(s) found"
@@ -145,7 +185,7 @@ def list_notebooks(
     cfg = Config.load()
     try:
         with _transport(cfg) as t:
-            lib = _library(cfg, t)
+            lib = Library(t, cfg.root)
             docs_index = lib.load()
             docs = lib.documents(include_deleted=all_)
     except Exception as e:  # noqa: BLE001
@@ -157,7 +197,6 @@ def list_notebooks(
 
     if tree:
         root = Tree(f"[bold]{cfg.ssh.host}[/]")
-        # Build folder nodes lazily by full path.
         nodes: dict[str, Tree] = {"": root}
 
         def node_for(uuid: str) -> Tree:
@@ -184,11 +223,11 @@ def pull(
     name: str = typer.Argument(..., help="Notebook name, path, or UUID."),
     out: Path = typer.Option(None, "-o", "--out", help="Output PDF path."),
 ) -> None:
-    """Render a notebook to a local PDF."""
+    """Render a notebook to a local PDF (no LLM)."""
     cfg = Config.load()
     try:
         with _transport(cfg) as t:
-            lib = _library(cfg, t)
+            lib = Library(t, cfg.root)
             doc = lib.resolve(name)
             path = lib.path_of(doc.uuid)
             console.print(f"Pulling [bold]{path}[/] …")
@@ -213,19 +252,13 @@ def pull(
 @app.command()
 def ask(
     name: str = typer.Argument(..., help="Notebook name, path, or UUID."),
-    prompt: str = typer.Argument(..., help="What to ask Claude about the note."),
+    prompt: str = typer.Argument(..., help="What to ask about the note."),
 ) -> None:
-    """Ask Claude anything about a notebook."""
+    """Ask the broker anything about a notebook."""
     cfg = Config.load()
-    _, pngs = _render_pngs(cfg, name)
-    console.print("Asking Claude …\n")
-    try:
-        answer = llm.ask(
-            pngs, prompt, model=cfg.llm.model, api_key=cfg.llm.api_key,
-            max_tokens=cfg.llm.max_tokens,
-        )
-    except llm.LLMError as e:
-        _fatal(str(e))
+    with _rendered_note(cfg, name) as (_, paths, workdir):
+        console.print("Asking the broker …\n")
+        answer = _brain(cfg, paths, workdir, prompt)
     console.print(answer)
 
 
@@ -235,15 +268,9 @@ def summary(
 ) -> None:
     """Summarise a notebook."""
     cfg = Config.load()
-    _, pngs = _render_pngs(cfg, name)
-    console.print("Summarising with Claude …\n")
-    try:
-        answer = llm.ask(
-            pngs, llm.SUMMARY_PROMPT, model=cfg.llm.model, api_key=cfg.llm.api_key,
-            max_tokens=cfg.llm.max_tokens,
-        )
-    except llm.LLMError as e:
-        _fatal(str(e))
+    with _rendered_note(cfg, name) as (_, paths, workdir):
+        console.print("Summarising via the broker …\n")
+        answer = _brain(cfg, paths, workdir, llm.SUMMARY_PROMPT)
     console.print(answer)
 
 
@@ -254,15 +281,9 @@ def diagram(
 ) -> None:
     """Turn a notebook into a Mermaid flow diagram."""
     cfg = Config.load()
-    _, pngs = _render_pngs(cfg, name)
-    console.print("Drawing a flow diagram with Claude …\n")
-    try:
-        answer = llm.ask(
-            pngs, llm.DIAGRAM_PROMPT, model=cfg.llm.model, api_key=cfg.llm.api_key,
-            max_tokens=cfg.llm.max_tokens,
-        )
-    except llm.LLMError as e:
-        _fatal(str(e))
+    with _rendered_note(cfg, name) as (_, paths, workdir):
+        console.print("Drawing a flow diagram via the broker …\n")
+        answer = _brain(cfg, paths, workdir, llm.DIAGRAM_PROMPT)
     console.print(answer)
     if out:
         out.write_text(answer + "\n")
