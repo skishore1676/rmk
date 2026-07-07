@@ -17,6 +17,8 @@ dependencies = [
     # The brain. rmk routes every LLM request through Suman's agent broker,
     # which handles provider selection and runs the logged-in `claude` CLI.
     "agent-broker",
+    "svglib>=1.5",
+    "reportlab>=4.0",
 ]
 
 [project.scripts]

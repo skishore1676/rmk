@@ -32,9 +32,10 @@ which owns provider selection / failover / receipts and runs the logged-in
                                                      └───────────┘
 ```
 
-1. **transport** — SSH/SFTP into the tablet and read its document store. Today
-   this is USB (`10.11.99.1`); the `Transport` interface is swappable so the
-   reMarkable Cloud API can slot in later.
+1. **transport** — read the tablet's document store. Two implementations today:
+   `local` (the **reMarkable desktop app**'s synced folder on this Mac — no
+   tablet needed) and `ssh` (USB/Wi-Fi to a physical tablet at `10.11.99.1`).
+   The interface is swappable, so the reMarkable Cloud API can slot in later.
 2. **library** — turn the flat UUID store into named notebooks and resolve
    `"Roadmap"` (or a path, or a UUID) to the right one.
 3. **render** — `rmc`/`rmscene` convert the `.rm` v6 strokes to a PDF; `pypdfium2`
@@ -45,10 +46,9 @@ which owns provider selection / failover / receipts and runs the logged-in
 
 ## Setup
 
-You need: a reMarkable 2 in **developer mode** with SSH enabled (Settings →
-General → Software / Help), the [agent-broker](https://github.com/skishore1676/agent-broker)
-repo checked out **next to this one** (`../agent-broker`), and the `claude` CLI
-logged in. Then:
+You need the [agent-broker](https://github.com/skishore1676/agent-broker) repo
+checked out **next to this one** (`../agent-broker`) and the `claude` CLI logged
+in:
 
 ```bash
 uv sync              # installs rmk + agent-broker (editable, from ../agent-broker)
@@ -56,9 +56,22 @@ claude auth status   # should show loggedIn: true — that's the LLM auth
 uv run rmk init      # writes ~/.config/rmk/config.toml
 ```
 
-Edit the config and set `[ssh].password` — it's shown **on the tablet** at
-Settings → Help → Copyrights and licenses. (Or set up SSH key auth and use
-`key_path` instead.) Then plug in the tablet over USB and verify:
+Then pick a source in the config's `[remarkable]` section:
+
+**A) The desktop app (no tablet — recommended, and the tested path).** If you run
+the reMarkable desktop app, it keeps a synced copy of your notebooks locally:
+
+```toml
+[remarkable]
+transport = "local"
+root = "/Users/<you>/Library/Containers/com.remarkable.desktop/Data/Library/Application Support/remarkable/desktop"
+```
+
+**B) A physical tablet over SSH.** Needs developer mode / SSH enabled (Settings →
+General → Software). Set `transport = "ssh"` and `[ssh].password` — shown on the
+tablet at Settings → Help → Copyrights and licenses (or use `key_path`).
+
+Then verify:
 
 ```bash
 uv run rmk doctor
@@ -101,7 +114,10 @@ role  = "note_reader"
   render only the ink layer today (the background PDF is not merged in).
 - Very long notebooks are capped at the first 20 pages per broker call (with a
   warning) to keep payloads reasonable.
-- Transport is USB-SSH; the cloud path is stubbed for later.
+- Transport is `local` (desktop-app store) or `ssh` (tablet); the cloud path is
+  stubbed for later.
+- Rendering is pure-Python (`.rm`→SVG via `rmc`, →PDF via `svglib`/`reportlab`,
+  →PNG via `pypdfium2`) — no Inkscape or Cairo system deps.
 - Depends on a sibling `../agent-broker` checkout (path dependency), so the
   public repo isn't `pip install`-able standalone — it's wired to Suman's brain.
 

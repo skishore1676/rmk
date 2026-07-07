@@ -1,13 +1,19 @@
 """Render reMarkable ``.rm`` stroke files to PDF and PNG.
 
-The reMarkable 2 stores handwriting in the block-based ``.rm`` v6 format. We use
-``rmc`` (which wraps ``rmscene``) to convert each page to a one-page PDF, merge
-the pages into a notebook PDF with ``pypdf``, and rasterise pages to PNG with
-``pypdfium2`` (self-contained — no Cairo/system deps) for the vision model.
+The reMarkable 2 stores handwriting in the block-based ``.rm`` v6 format. Pipeline:
+
+    .rm  --rmc-->  SVG  --svglib/reportlab-->  PDF  --pypdfium2-->  PNG
+
+We deliberately do NOT use ``rmc``'s own PDF export: it shells out to Inkscape
+(a heavy external app) and silently writes a 0-byte PDF when Inkscape is absent.
+``rmc``'s SVG export is pure-Python and reliable, so we rasterise from there with
+``svglib``+``reportlab`` (SVG→PDF) and ``pypdfium2`` (PDF→PNG) — all pip-only,
+no system libraries (Cairo/Inkscape) required.
 """
 
 from __future__ import annotations
 
+import io
 import os
 import shutil
 import subprocess
@@ -17,6 +23,8 @@ from pathlib import Path
 
 import pypdfium2 as pdfium
 from pypdf import PdfWriter
+from reportlab.graphics import renderPDF
+from svglib.svglib import svg2rlg
 
 
 class RenderError(RuntimeError):
@@ -38,22 +46,36 @@ def _rmc_bin() -> str:
     )
 
 
-def _page_to_pdf(rm_bytes: bytes, out_pdf: str) -> None:
+def _page_to_svg(rm_bytes: bytes, out_svg: str) -> None:
     with tempfile.NamedTemporaryFile(suffix=".rm", delete=False) as f:
         f.write(rm_bytes)
         tmp_rm = f.name
     try:
         proc = subprocess.run(
-            [_rmc_bin(), "-t", "pdf", "-o", out_pdf, tmp_rm],
+            [_rmc_bin(), "-t", "svg", "-o", out_svg, tmp_rm],
             capture_output=True,
             text=True,
         )
-        if proc.returncode != 0 or not os.path.exists(out_pdf):
+        # rmc emits a harmless "some data not read" warning for newer .rm blocks
+        # on stderr but still returns 0 and writes a valid SVG. Only a nonzero
+        # exit or a missing/empty file is a real failure.
+        if proc.returncode != 0 or not os.path.exists(out_svg) or os.path.getsize(out_svg) == 0:
             raise RenderError(
-                f"rmc failed to render a page:\n{proc.stderr.strip() or proc.stdout.strip()}"
+                f"rmc failed to render a page to SVG:\n"
+                f"{proc.stderr.strip() or proc.stdout.strip()}"
             )
     finally:
         os.unlink(tmp_rm)
+
+
+def _page_to_pdf(rm_bytes: bytes, out_pdf: str) -> None:
+    with tempfile.TemporaryDirectory() as td:
+        svg = os.path.join(td, "page.svg")
+        _page_to_svg(rm_bytes, svg)
+        drawing = svg2rlg(svg)
+        if drawing is None:
+            raise RenderError("Could not parse the rendered SVG for a page.")
+        renderPDF.drawToFile(drawing, out_pdf)
 
 
 def pages_to_pdf(pages: list[bytes], out_pdf: str) -> str:
@@ -81,10 +103,7 @@ def pdf_to_pngs(pdf_path: str, scale: float = 2.0) -> list[bytes]:
     try:
         out: list[bytes] = []
         for page in doc:
-            bitmap = page.render(scale=scale)
-            pil = bitmap.to_pil()
-            import io
-
+            pil = page.render(scale=scale).to_pil()
             buf = io.BytesIO()
             pil.save(buf, format="PNG")
             out.append(buf.getvalue())

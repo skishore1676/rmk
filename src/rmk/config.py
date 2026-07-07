@@ -56,6 +56,9 @@ class BrokerConfig:
 class Config:
     ssh: SSHConfig = field(default_factory=SSHConfig)
     broker: BrokerConfig = field(default_factory=BrokerConfig)
+    # "ssh" reads from the tablet over SSH; "local" reads a local xochitl dir
+    # (e.g. the reMarkable desktop app's synced store).
+    transport: str = "ssh"
     root: str = DEFAULT_XOCHITL_ROOT
 
     @classmethod
@@ -69,6 +72,8 @@ class Config:
             rm = data.get("remarkable", {})
             if "root" in rm:
                 cfg.root = rm["root"]
+            if "transport" in rm:
+                cfg.transport = rm["transport"]
 
         # Environment overrides (secrets and quick tweaks).
         if v := os.environ.get("RMK_SSH_HOST"):
@@ -113,5 +118,11 @@ timeout = 600
 # role  = "note_reader"
 
 [remarkable]
+# "ssh" = read from the tablet; "local" = read a local xochitl directory such as
+# the reMarkable desktop app's synced store (no tablet needed).
+transport = "ssh"
 root = "/home/root/.local/share/remarkable/xochitl"
+# For transport = "local", point root at the desktop app store, e.g.:
+# transport = "local"
+# root = "/Users/suman/Library/Containers/com.remarkable.desktop/Data/Library/Application Support/remarkable/desktop"
 """

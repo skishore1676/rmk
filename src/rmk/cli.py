@@ -22,7 +22,7 @@ from rich.tree import Tree
 from . import llm, render
 from .config import CONFIG_TEMPLATE, Config, config_path
 from .library import Library, full_path
-from .transport import SSHTransport
+from .transport import LocalTransport, SSHTransport
 
 app = typer.Typer(
     add_completion=False,
@@ -34,7 +34,9 @@ err = Console(stderr=True)
 
 
 # -- helpers -----------------------------------------------------------------
-def _transport(cfg: Config) -> SSHTransport:
+def _transport(cfg: Config):
+    if cfg.transport == "local":
+        return LocalTransport()
     return SSHTransport(
         host=cfg.ssh.host,
         user=cfg.ssh.user,
@@ -42,6 +44,12 @@ def _transport(cfg: Config) -> SSHTransport:
         key_path=cfg.ssh.key_path,
         port=cfg.ssh.port,
     )
+
+
+def _source_label(cfg: Config) -> str:
+    if cfg.transport == "local":
+        return "local store"
+    return f"{cfg.ssh.user}@{cfg.ssh.host}"
 
 
 def _fatal(msg: str) -> None:
@@ -161,17 +169,15 @@ def doctor() -> None:
             "  Is agent-broker installed? (`uv sync` in the rmk repo.)"
         )
 
-    # SSH + a real read.
+    # Read a real listing from the configured source.
+    label = f"tablet ({_source_label(cfg)})" if cfg.transport == "ssh" else "local store"
     try:
         with _transport(cfg) as t:
             docs = Library(t, cfg.root).documents()
-        console.print(
-            f"tablet SSH ({cfg.ssh.user}@{cfg.ssh.host}): [green]ok[/] "
-            f"— {len(docs)} notebook(s) found"
-        )
+        console.print(f"{label}: [green]ok[/] — {len(docs)} notebook(s) found")
     except Exception as e:  # noqa: BLE001
         ok = False
-        console.print(f"tablet SSH ({cfg.ssh.user}@{cfg.ssh.host}): [red]failed[/] — {e}")
+        console.print(f"{label}: [red]failed[/] — {e}")
 
     raise typer.Exit(0 if ok else 1)
 
@@ -196,7 +202,7 @@ def list_notebooks(
         return
 
     if tree:
-        root = Tree(f"[bold]{cfg.ssh.host}[/]")
+        root = Tree(f"[bold]{_source_label(cfg)}[/]")
         nodes: dict[str, Tree] = {"": root}
 
         def node_for(uuid: str) -> Tree:

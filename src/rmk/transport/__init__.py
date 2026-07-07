@@ -6,6 +6,7 @@ without touching the library/render/LLM code.
 """
 
 from .base import Transport
+from .local import LocalTransport
 from .ssh import SSHTransport
 
-__all__ = ["Transport", "SSHTransport"]
+__all__ = ["Transport", "SSHTransport", "LocalTransport"]
