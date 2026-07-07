@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+
+# rmk outputs / scratch
+*.pdf
+*.mmd
+*.png
+
+# OS
+.DS_Store
