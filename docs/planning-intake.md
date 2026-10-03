@@ -52,6 +52,37 @@ were checked visually, including the incomplete `10/03` reflection.
 
 Remarkable's full suite passed 80 tests; Career regressions passed four tests
 and their subcases. Private receipts and interpretations remain under the
-milestone-1 evidence directory on the Air. The scheduled oldmac service is not
-activated: its installed desktop app has an empty cache and no selected
-Thoughts source. Account pairing/sync and natural runtime proof remain gates.
+milestone-1 evidence directory on the Air. The oldmac official desktop app is now paired and its selected Thoughts source
+was captured completely. Deployed behavior, locked-session sync, natural schedule
+pickup and usefulness are separate acceptance receipts.
+
+
+## App-owned oldmac operation
+
+`python -m rmk.runtime` owns one whole-cycle lock, capture, Broker interpretation,
+checked project publication and exact-main confirmation. It uses a dedicated
+canonical workspace worktree; unrelated edits stop the cycle. Interrupted
+publication is reconciled before new capture, with immutable reads reused. The
+existing routine project publisher owns validation and merge; an open PR is not
+delivery. Three bounded publication recovery attempts, failed CI or conflicts
+require owner attention. No alternate sender or Lathi scheduler is installed.
+
+The private `runtime.json` next to the ordinary rmk config declares schema
+`rmk.runtime.v1`, notebook UUID, existing project slug, selected baseline page
+UUIDs, private capture `state_dir`, dedicated `workspace`, `paused`, daily
+`hour`/`minute`, IANA `timezone` and `max_storage_bytes`. The initial bound is
+2 GiB: stop for review when reached, retaining all pilot and referenced evidence.
+There is no automatic pruning. Raw source and model results remain private.
+
+Controls: `status --json`, `run-now`, `pause-schedule`, `resume-schedule`, and
+`install [--load]`. The launchd job is `ai.remarkable.intake`, without RunAtLoad.
+Activation requires the selected complete desktop source and matching host
+timezone. Pause unloads only this job and preserves checkpoints; resume requires
+source access. Lathi invokes these same owner controls and projects owner status.
+Status distinguishes current file access from unknown tablet freshness and shows
+unselected baseline history explicitly. Quiet publication recovery does not page.
+
+For the one-time Air-to-oldmac handoff, `Intake.adopt_reading` accepts only an
+owned successful immutable result whose notebook/page hash matches the current
+capture. It preserves original observation provenance and Broker receipt, and
+never substitutes a new provider call or inferred writing date.
