@@ -91,3 +91,32 @@ If the host source has changed since the Air reading, the historical handoff
 requires the exact private prior stroke bytes. It seeds a prior comparison,
 never current interpretation or delivery. The changed page receives a new
 Broker call, and its extract explicitly supersedes the previous reading.
+
+### Bounded runtime recovery
+
+Resume holds the same owner lock as intake. It keeps the prior pause checkpoint
+until launchd loading is verified. Failed bootstrap/verification or a checkpoint
+failure rolls back only the app's own service, preserves the prior pause where
+storage permits, and retains a private control receipt with an actionable reason.
+An enabled service that cannot be confirmed loaded is owner attention; it is
+never reported as healthy/idle merely because its configuration says enabled.
+
+Known Git/GitHub network interruptions, timeout, rate-limit and server errors
+receive at most three attempts inside the same command, with short bounded
+backoff and `recovering/attention_required=false` receipts. Exhaustion becomes
+owner attention while retaining completed interpretations and exact publication
+intent. A later existing-cadence retry can reconcile successful remote delivery.
+Authentication, conflicts, invalid evidence and failed validation remain explicit
+owner gates. Recovery creates no watcher, queue, extra schedule or model retry.
+
+Publication replay verifies its saved commit against the exact staged hashes and
+pushes that immutable commit, even if the dedicated checkout's HEAD has changed.
+An uncertain PR-create response is reconciled by its existing deterministic branch
+before another creation; confirmation conflicts are not swallowed as quiet wait.
+
+The reliability closeout uses synthetic notebooks and real temporary Git stores;
+29 runtime checks and the 109-test suite pass. Cases include failed/partial
+activation, checkpoint rollback, missing service, transient success, exhausted
+recovery followed by catch-up, changed HEAD, invalid saved commit, and uncertain
+PR creation without duplicate reading or PR effects. Deployment/Tower receipts
+are retained privately on oldmac; paused production prerequisites remain pending.
