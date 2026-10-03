@@ -105,10 +105,12 @@ def page_order(content: dict) -> list[str]:
         for p in cpages["pages"]:
             pid = p.get("id") if isinstance(p, dict) else None
             # A page with a "deleted" marker was removed on-device.
-            if pid and not (isinstance(p, dict) and p.get("deleted")):
+            deleted = p.get("deleted", False) if isinstance(p, dict) else False
+            if isinstance(deleted, dict):
+                deleted = deleted.get("value", False)
+            if pid and not deleted:
                 ids.append(pid)
-        if ids:
-            return ids
+        return ids
     pages = content.get("pages")
     if isinstance(pages, list):
         return [p for p in pages if isinstance(p, str)]
@@ -165,32 +167,14 @@ class Library:
         return matches[0]
 
     def read_pages(self, uuid: str) -> list[bytes]:
-        """Return the ordered list of raw ``.rm`` page files for a notebook.
+        """Read declared active pages only; reject missing/malformed order.
 
-        Falls back to a sorted directory listing when ``.content`` has no usable
-        page order.
+        Orphan and deleted stroke files are never appended. This legacy API
+        returns bytes; capture additionally verifies metadata and source stability.
         """
-        doc_dir = f"{self.root}/{uuid}"
-        rm_files = self.transport.read_many(doc_dir, (".rm",))
-        if not rm_files:
-            return []
+        from .snapshot import active_pages, checked_id
 
-        order: list[str] = []
-        try:
-            content = json.loads(self.transport.read_bytes(f"{self.root}/{uuid}.content"))
-            order = page_order(content)
-        except Exception:  # noqa: BLE001 — degrade to filename sort
-            order = []
-
-        pages: list[bytes] = []
-        used: set[str] = set()
-        for pid in order:
-            fname = f"{pid}.rm"
-            if fname in rm_files:
-                pages.append(rm_files[fname])
-                used.add(fname)
-        # Append any pages not referenced by the ordering, in filename order.
-        for fname in sorted(rm_files):
-            if fname not in used:
-                pages.append(rm_files[fname])
-        return pages
+        checked_id(uuid)
+        content = json.loads(self.transport.read_bytes(f"{self.root}/{uuid}.content"))
+        return [self.transport.read_bytes(f"{self.root}/{uuid}/{pid}.rm")
+                for pid in active_pages(content)]

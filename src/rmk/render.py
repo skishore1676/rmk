@@ -134,3 +134,69 @@ def pages_to_png_files(pages: list[bytes], out_dir: str, scale: float = 2.0) -> 
             f.write(data)
         paths.append(p)
     return paths
+
+
+# Increment when the capture rendering recipe changes.
+CAPTURE_RENDER_VERSION = "ink-tiles-v1"
+
+
+def tile_ranges(height: int, size: int = 1800, overlap: int = 150):
+    """Cover a full page with overlapping sections, including the bottom."""
+    if height <= 0 or size <= 0 or not 0 <= overlap < size:
+        raise ValueError("Invalid tile dimensions")
+    top = 0
+    while top < height:
+        bottom = min(top + size, height)
+        yield top, bottom
+        if bottom == height:
+            break
+        top = bottom - overlap
+
+
+def render_tiles(data: bytes, output: Path) -> dict:
+    """Render full ink bounds using the Career review recipe; no page cap."""
+    import math
+    import xml.etree.ElementTree as ET
+
+    with tempfile.TemporaryDirectory(prefix="rmk-tiles-") as tmp:
+        svg = Path(tmp) / "page.svg"
+        _page_to_svg(data, str(svg))
+        tree = ET.parse(svg)
+        node = tree.getroot()
+        x, y, width, height = map(float, node.attrib["viewBox"].split())
+        if not all(math.isfinite(v) for v in (x, y, width, height)) or width <= 0 or height <= 0:
+            raise RenderError("Invalid SVG ink bounds")
+        node.set("viewBox", f"{x-12} {y-12} {width+24} {height+24}")
+        node.set("width", str(width + 24))
+        node.set("height", str(height + 24))
+        tree.write(svg)
+        drawing = svg2rlg(str(svg))
+        if drawing is None:
+            raise RenderError("Could not parse rendered SVG")
+        pdf = pdfium.PdfDocument(renderPDF.drawToString(drawing))
+        try:
+            page = pdf[0]
+            try:
+                bitmap = page.render(scale=3)
+                try:
+                    image = bitmap.to_pil().convert("RGB")
+                finally:
+                    bitmap.close()
+            finally:
+                page.close()
+        finally:
+            pdf.close()
+    try:
+        tiles = []
+        for index, (top, bottom) in enumerate(tile_ranges(image.height), 1):
+            file = output / f"tile-{index:02d}.png"
+            tile = image.crop((0, top, image.width, bottom))
+            try:
+                tile.save(file)
+            finally:
+                tile.close()
+            file.chmod(0o600)
+            tiles.append({"file": file.name, "y_start": top, "y_end": bottom})
+        return {"width": image.width, "height": image.height, "tiles": tiles}
+    finally:
+        image.close()

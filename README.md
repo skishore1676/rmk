@@ -97,6 +97,12 @@ role  = "note_reader"
 
 | Command | What it does |
 | --- | --- |
+| `rmk capture UUID [--state-dir DIR]` | Stable private capture and page changes as JSON, no model. |
+| `rmk status UUID [--state-dir DIR]` | Inspect the last capture checkpoint as JSON. |
+| `rmk changes UUID [--state-dir DIR]` | Inspect the last successful transition, including baseline. |
+| `rmk interpret UUID --page PAGE-UUID [--execute]` | Preview privately or perform approved Broker page reads. |
+| `rmk stage-intake UUID --workspace PATH --project SLUG [--page PAGE-UUID]` | Stage bounded extracts in an existing project. |
+| `rmk confirm-intake UUID --workspace PATH --project SLUG --commit SHA [--page PAGE-UUID]` | Confirm exact extracts on shared main before advancing delivery. |
 | `rmk init` | Write a starter config file. |
 | `rmk doctor` | Check config / SSH / renderer / broker. |
 | `rmk ls [--tree] [--all]` | List notebooks (optionally as a folder tree). |
@@ -106,6 +112,68 @@ role  = "note_reader"
 | `rmk ask NAME "question"` | Ask the broker anything about a notebook. |
 
 `NAME` can be a notebook name, a full path (`Ideas/Roadmap`), or a UUID.
+
+## Stable local capture
+
+Select a notebook by UUID, using `rmk ls` for discovery. `capture` reads only
+that notebook's metadata, content and declared active stroke files from the
+configured local desktop store. It does not call a model. For example:
+
+```bash
+rmk capture NOTEBOOK-UUID
+rmk capture NOTEBOOK-UUID       # same source revision: unchanged, no new artifacts
+rmk status NOTEBOOK-UUID
+rmk changes NOTEBOOK-UUID
+```
+
+Private state defaults to the platform's user data directory (`rmk/capture`),
+which on macOS is `~/Library/Application Support/rmk/capture`. `--state-dir`
+selects another private location; paths inside Git, inside the source store, or
+containing the source store are rejected. Directories are owner-only (0700),
+files 0600. Raw source, renders and manifests belong outside Git.
+
+The first successful capture is a **baseline**, with no pages reported as new.
+Subsequent results distinguish added, edited and removed page UUIDs. An edit on
+an old page is detected. Rename and reorder flags are separate from handwriting
+changes. Reorder compares the surviving pages, so inserting/removing a page does
+not alone count as reordering. Explicit empty order captures zero active pages;
+missing/malformed order or a missing active stroke file fails. Modern page order
+is authoritative, including boolean and integer 0/1 deletion tombstones. Orphan
+and deleted stroke files are never read or appended. Existing notebook reads now
+also use strict declared order instead of filename fallback.
+
+Each immutable `revisions/<hash>/manifest.json` records notebook/page identity,
+source hashes and modification metadata, observed UTC time, active order,
+complete page dimensions/overlapping tile coordinates, render version and
+artifact checksums. Capture renders every active page, including full long-page
+ink bounds, without the existing broker command's 20-page limit. Tile filenames
+in the manifest are relative to the revision directory. Blank active pages are
+included. Capture revisions include source metadata, so a rename can change the
+revision while producing no new/edited page.
+
+A per-source/notebook process lock rejects overlapping captures immediately.
+Source bytes are reread after the initial snapshot and before successful
+checkpoint publication. Completed artifacts are flushed before `state.json` is
+atomically replaced. Failed staging/checkpoint temporary files remain private
+and are never treated as a successful capture. Interrupted publication can reuse
+an already completed immutable revision. Corrupt checkpoints or artifacts fail
+closed; preserve the evidence and use an explicitly selected new state directory
+to rebaseline, rather than silently discarding history. There is no pruning.
+If interruption makes checkpoint publication uncertain, inspect `status` or retry
+`capture`; the persisted pointer, not a lost command response, owns the result.
+
+An unchanged replay returns a fresh `observed_at` with empty change lists and
+does not replace the capture checkpoint. `changes` retains the last successful
+transition, and `status` reports that checkpoint's time; neither probes the source
+or proves current accessibility. Capture, interpretation and confirmed project
+delivery have distinct checkpoints; `status` reports their coverage separately.
+Scheduling and pause/resume controls remain a later milestone.
+Tablet/cloud synchronization freshness is explicitly unknown. The
+optimistic source reread detects observed changes; it is not a transactional
+snapshot of the official app and cannot prove an unobserved change-and-revert.
+
+See [milestone 1 verification](docs/milestone-1.md) for synthetic and real evidence.
+See [reading and project intake](docs/planning-intake.md) for the approved model-call path and publication checks.
 
 ## Status & limits (v1)
 
