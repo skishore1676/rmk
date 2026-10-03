@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
@@ -20,6 +21,7 @@ from rich.console import Console
 from rich.tree import Tree
 
 from . import llm, render
+from .capture import CaptureStore, default_state_dir
 from .config import CONFIG_TEMPLATE, Config, config_path
 from .library import Library, full_path
 from .transport import LocalTransport, SSHTransport
@@ -110,6 +112,58 @@ def _brain(cfg: Config, image_paths: list[str], working_dir: str, prompt: str) -
         )
     except llm.LLMError as e:
         _fatal(str(e))
+
+
+def _capture_store(cfg: Config, notebook_id: str, state_dir: Path, transport):
+    if cfg.transport != "local":
+        raise ValueError("Capture currently requires the configured local desktop store")
+    return CaptureStore(state_dir, transport, cfg.root, notebook_id)
+
+
+@app.command()
+def capture(
+    notebook_id: str = typer.Argument(..., help="Selected notebook UUID (stable across renames)."),
+    state_dir: Path = typer.Option(None, "--state-dir", help="Private state/artifacts outside Git and source."),
+) -> None:
+    """Capture every active page and report changes as JSON; no model call."""
+    cfg = Config.load()
+    if cfg.transport != "local":
+        _fatal("Capture currently requires the configured local desktop store")
+    try:
+        with LocalTransport() as transport:
+            result = _capture_store(cfg, notebook_id, state_dir or default_state_dir(), transport).capture()
+    except Exception as exc:
+        _fatal(str(exc))
+    typer.echo(json.dumps(result, indent=2))
+
+
+@app.command()
+def status(
+    notebook_id: str = typer.Argument(..., help="Selected notebook UUID."),
+    state_dir: Path = typer.Option(None, "--state-dir"),
+) -> None:
+    """Inspect the last successful capture as JSON; no source read or model."""
+    cfg = Config.load()
+    try:
+        result = _capture_store(cfg, notebook_id, state_dir or default_state_dir(), LocalTransport()).status()
+    except Exception as exc:
+        _fatal(str(exc))
+    typer.echo(json.dumps(result, indent=2))
+
+
+@app.command("changes")
+def inspect_changes(
+    notebook_id: str = typer.Argument(..., help="Selected notebook UUID."),
+    state_dir: Path = typer.Option(None, "--state-dir"),
+) -> None:
+    """Inspect changes at the last capture checkpoint, including baseline flag."""
+    cfg = Config.load()
+    try:
+        result = _capture_store(cfg, notebook_id, state_dir or default_state_dir(), LocalTransport()).status()
+    except Exception as exc:
+        _fatal(str(exc))
+    checkpoint = result["capture"]
+    typer.echo(json.dumps(checkpoint["changes"] if checkpoint else None, indent=2))
 
 
 # -- commands ----------------------------------------------------------------
