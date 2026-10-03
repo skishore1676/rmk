@@ -101,11 +101,54 @@ class Intake:
                 result = self._result(reference["id"], reference["sha256"])
                 if result["page_sha256"] == page["sha256"]:
                     current.append(result["id"])
+        history = sum(p["id"] not in state["pages"] and state["baseline_hashes"] is not None
+                      and state["baseline_hashes"].get(p["id"]) == p["sha256"] for p in pages)
         confirmed = sum(identity in state["deliveries"] for identity in current)
         return {"interpretation": {"current_pages": len(current), "active_pages": len(pages),
+                                   "unselected_baseline_pages": history, "pending_pages": len(pages) - history - len(current),
                                    "status": "complete" if pages and len(current) == len(pages) else "partial" if current else "not_started"},
                 "delivery": {"confirmed_current_pages": confirmed,
                              "status": "confirmed_on_main" if current and confirmed == len(current) else "partial" if confirmed else "not_confirmed"}}
+
+    def adopt_reading(self, path: Path) -> dict:
+        """Reuse an owned completed reading only against identical current page bytes.
+
+        Used for a one-time host handoff, not importing arbitrary notebook text.
+        Original source/observation provenance and Broker receipt stay immutable.
+        """
+        with self.store._lock():
+            _, manifest = self.store._load()
+            if manifest is None:
+                raise CaptureError("Capture the current source before adopting a reading")
+            data = path.read_bytes()
+            result = json.loads(data)
+            if not isinstance(result.get("id"), str) or not re.fullmatch(r"[0-9a-f]{64}", result["id"]):
+                raise CaptureError("Invalid reading identity")
+            checked_id(result["page_id"])
+            if result["schema"] != READING_SCHEMA or digest(_json_bytes(result["identity_basis"])) != result["id"]:
+                raise CaptureError("Invalid reading identity basis")
+            validate_reading(result["reading"])
+            if result["receipt"]["status"] != "succeeded" or not result["receipt"]["receipt_id"]:
+                raise CaptureError("Adopt only a completed Broker reading")
+            state = self._load()
+            page = next((p for p in manifest["pages"] if p["id"] == result["page_id"]), None)
+            if page is None or result["notebook_id"] != self.store.notebook_id or page["sha256"] != result["page_sha256"]:
+                raise CaptureError("Reading does not match the current selected source")
+            previous = state["pages"].get(result["page_id"])
+            if previous is not None and previous["id"] != result["id"]:
+                raise CaptureError("Existing interpretation preserved; reconcile before adopting")
+            directory = self.store.directory / "interpretations"; _private_dir(directory)
+            destination = directory / f"{result['id']}.json"
+            if destination.exists() and destination.read_bytes() != data:
+                raise CaptureError("Existing immutable reading differs")
+            if not destination.exists():
+                _write(destination, data)
+            self._result(result["id"], digest(data))
+            if state["baseline_hashes"] is None:
+                state["baseline_hashes"] = {p["id"]: p["sha256"] for p in manifest["pages"]}
+            state["pages"][result["page_id"]] = {"id": result["id"], "sha256": digest(data)}
+            _atomic_write(self.path, state)
+            return {"status": "adopted_owned_reading", "interpretation_id": result["id"], "page_id": result["page_id"]}
 
     def _result(self, identity: str, checksum: str | None = None) -> dict:
         if not re.fullmatch(r"[0-9a-f]{64}", identity):
