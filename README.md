@@ -100,6 +100,9 @@ role  = "note_reader"
 | `rmk capture UUID [--state-dir DIR]` | Stable private capture and page changes as JSON, no model. |
 | `rmk status UUID [--state-dir DIR]` | Inspect the last capture checkpoint as JSON. |
 | `rmk changes UUID [--state-dir DIR]` | Inspect the last successful transition, including baseline. |
+| `rmk interpret UUID --page PAGE-UUID [--execute]` | Preview privately or perform approved Broker page reads. |
+| `rmk stage-intake UUID --workspace PATH --project SLUG [--page PAGE-UUID]` | Stage bounded extracts in an existing project. |
+| `rmk confirm-intake UUID --workspace PATH --project SLUG --commit SHA [--page PAGE-UUID]` | Confirm exact extracts on shared main before advancing delivery. |
 | `rmk init` | Write a starter config file. |
 | `rmk doctor` | Check config / SSH / renderer / broker. |
 | `rmk ls [--tree] [--all]` | List notebooks (optionally as a folder tree). |
@@ -162,13 +165,15 @@ If interruption makes checkpoint publication uncertain, inspect `status` or retr
 An unchanged replay returns a fresh `observed_at` with empty change lists and
 does not replace the capture checkpoint. `changes` retains the last successful
 transition, and `status` reports that checkpoint's time; neither probes the source
-or proves current accessibility. The checkpoint is **capture only**. Reading,
-interpretation, project delivery, scheduling and pause/resume controls are later
-milestones. Tablet/cloud synchronization freshness is explicitly unknown. The
+or proves current accessibility. Capture, interpretation and confirmed project
+delivery have distinct checkpoints; `status` reports their coverage separately.
+Scheduling and pause/resume controls remain a later milestone.
+Tablet/cloud synchronization freshness is explicitly unknown. The
 optimistic source reread detects observed changes; it is not a transactional
 snapshot of the official app and cannot prove an unobserved change-and-revert.
 
 See [milestone 1 verification](docs/milestone-1.md) for synthetic and real evidence.
+See [reading and project intake](docs/planning-intake.md) for the approved model-call path and publication checks.
 
 ## Status & limits (v1)
 

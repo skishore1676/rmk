@@ -200,10 +200,12 @@ class CaptureStore:
 
     def status(self) -> dict:
         state, manifest = self._load()
+        from .intake import Intake
+        intake = Intake(self).summary(manifest)
         return {"schema": SCHEMA, "notebook_id": self.notebook_id,
                 "capture": state, "artifact": str(self.directory / "revisions" / state["revision"]) if state else None,
                 "page_count": len(manifest["pages"]) if manifest else 0,
-                "sync_freshness": "unknown", "interpretation": "not_implemented", "delivery": "not_implemented"}
+                "sync_freshness": "unknown", **intake}
 
     def capture(self) -> dict:
         with self._lock():
