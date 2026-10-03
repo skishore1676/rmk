@@ -86,3 +86,8 @@ For the one-time Air-to-oldmac handoff, `Intake.adopt_reading` accepts only an
 owned successful immutable result whose notebook/page hash matches the current
 capture. It preserves original observation provenance and Broker receipt, and
 never substitutes a new provider call or inferred writing date.
+
+If the host source has changed since the Air reading, the historical handoff
+requires the exact private prior stroke bytes. It seeds a prior comparison,
+never current interpretation or delivery. The changed page receives a new
+Broker call, and its extract explicitly supersedes the previous reading.
