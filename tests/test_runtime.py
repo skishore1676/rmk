@@ -122,3 +122,19 @@ def test_resume_without_source_preserves_pause(runtime):
     with pytest.raises(CaptureError,match='Pair/sync'):
         runtime.control('resume-schedule')
     assert runtime.settings['paused']
+
+
+
+def test_changed_host_page_uses_verified_prior_only_for_comparison(runtime,tmp_path):
+    source=Path(runtime.cfg.root)/NB/f'{P1}.rm'
+    prior_strokes=tmp_path/'prior.rm';prior_strokes.write_bytes(source.read_bytes())
+    runtime.store.capture();runtime.intake.interpret([P1],reader)
+    ref=runtime.intake._load()['pages'][P1]
+    private=tmp_path/'reading.json';private.write_bytes((runtime.store.directory/'interpretations'/f"{ref['id']}.json").read_bytes())
+    source.write_bytes(source.read_bytes()+b' changed')
+    runtime.store.capture()
+    with pytest.raises(CaptureError):runtime.intake.adopt_reading(private)
+    assert runtime.intake.adopt_reading(private,prior_strokes=prior_strokes)['status']=='adopted_prior_comparison'
+    jobs=runtime.intake.plan([])
+    assert len(jobs)==1 and jobs[0]['identity_basis']['previous_id']==ref['id']
+    assert runtime.intake.summary(runtime.store._load()[1])['interpretation']['current_pages']==0

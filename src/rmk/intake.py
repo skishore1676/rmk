@@ -110,11 +110,13 @@ class Intake:
                 "delivery": {"confirmed_current_pages": confirmed,
                              "status": "confirmed_on_main" if current and confirmed == len(current) else "partial" if confirmed else "not_confirmed"}}
 
-    def adopt_reading(self, path: Path) -> dict:
+    def adopt_reading(self, path: Path, *, prior_strokes: Path | None = None) -> dict:
         """Reuse an owned completed reading only against identical current page bytes.
 
         Used for a one-time host handoff, not importing arbitrary notebook text.
         Original source/observation provenance and Broker receipt stay immutable.
+        A historical handoff additionally requires its exact prior stroke bytes;
+        it seeds comparison only and does not mark the current page interpreted.
         """
         with self.store._lock():
             _, manifest = self.store._load()
@@ -132,8 +134,13 @@ class Intake:
                 raise CaptureError("Adopt only a completed Broker reading")
             state = self._load()
             page = next((p for p in manifest["pages"] if p["id"] == result["page_id"]), None)
-            if page is None or result["notebook_id"] != self.store.notebook_id or page["sha256"] != result["page_sha256"]:
+            if page is None or result["notebook_id"] != self.store.notebook_id:
                 raise CaptureError("Reading does not match the current selected source")
+            matching = page["sha256"] == result["page_sha256"]
+            if not matching and (prior_strokes is None or digest(prior_strokes.read_bytes()) != result["page_sha256"]):
+                raise CaptureError("Reading does not match the current selected source")
+            if any(result[key] != result["identity_basis"][key] for key in ("notebook_id", "page_id", "page_sha256", "prompt_version")):
+                raise CaptureError("Reading fields do not match its immutable identity")
             previous = state["pages"].get(result["page_id"])
             if previous is not None and previous["id"] != result["id"]:
                 raise CaptureError("Existing interpretation preserved; reconcile before adopting")
@@ -148,7 +155,7 @@ class Intake:
                 state["baseline_hashes"] = {p["id"]: p["sha256"] for p in manifest["pages"]}
             state["pages"][result["page_id"]] = {"id": result["id"], "sha256": digest(data)}
             _atomic_write(self.path, state)
-            return {"status": "adopted_owned_reading", "interpretation_id": result["id"], "page_id": result["page_id"]}
+            return {"status": "adopted_owned_reading" if matching else "adopted_prior_comparison", "interpretation_id": result["id"], "page_id": result["page_id"]}
 
     def _result(self, identity: str, checksum: str | None = None) -> dict:
         if not re.fullmatch(r"[0-9a-f]{64}", identity):
