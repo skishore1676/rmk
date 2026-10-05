@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import fcntl
 import json
 import os
@@ -24,6 +24,35 @@ SCHEMA = "rmk.runtime.v1"
 LABEL = "ai.remarkable.intake"
 ORIGINS = {"https://github.com/skishore1676/pulsar-workspace.git", "git@github.com:skishore1676/pulsar-workspace.git"}
 RECOVERY_ATTEMPTS = 3
+COMPLETION_GRACE_MINUTES = 30
+
+
+def timestamp(value):
+    try:
+        result = datetime.fromisoformat(value)
+        return result if result.tzinfo is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def schedule_health(settings, receipt, control, observed_at):
+    """Daily completion expectation, owned by the app rather than Lathi."""
+    local = observed_at.astimezone(ZoneInfo(settings['timezone']))
+    today = local.replace(hour=settings['hour'], minute=settings['minute'], second=0, microsecond=0)
+    due = today if local >= today else today - timedelta(days=1)
+    next_fire = today if local < today else today + timedelta(days=1)
+    deadline = due + timedelta(minutes=settings.get('completion_grace_minutes', COMPLETION_GRACE_MINUTES))
+    resumed = timestamp(control.get('finished_at')) if control and control.get('status') == 'resumed' else None
+    started = timestamp(receipt.get('started_at')) if receipt else None
+    finished = timestamp(receipt.get('finished_at')) if receipt else None
+    completed = bool(receipt and receipt.get('status') == 'succeeded' and started and finished
+                     and due <= started <= finished <= observed_at)
+    expected = not settings['paused'] and not (resumed and resumed > due)
+    return {'expected_after': due.isoformat(), 'completion_deadline': deadline.isoformat(),
+            'next_fire': next_fire.isoformat() if not settings['paused'] else None,
+            'completion_grace_minutes': settings.get('completion_grace_minutes', COMPLETION_GRACE_MINUTES),
+            'current_completion': completed, 'expected_since_resume': expected,
+            'overdue': expected and not completed and local >= deadline}
 
 
 class RetryableError(CaptureError):
@@ -84,6 +113,9 @@ class Runtime:
         ZoneInfo(s["timezone"])
         if not 0 <= s["hour"] <= 23 or not 0 <= s["minute"] <= 59:
             raise CaptureError("Invalid daily capture time")
+        grace = s.get('completion_grace_minutes', COMPLETION_GRACE_MINUTES)
+        if isinstance(grace, bool) or not isinstance(grace, int) or not 1 <= grace <= 59:
+            raise CaptureError('Completion grace must be 1–59 minutes')
         self.cfg = cfg or Config.load()
         if self.cfg.transport != "local":
             raise CaptureError("Runtime requires the approved local desktop source")
@@ -258,29 +290,52 @@ class Runtime:
         loaded = self._service_loaded()
         control = json.loads(self.control_path.read_text()) if self.control_path.exists() else None
         paused = self.settings["paused"]
+        observed_at = now()
+        health = schedule_health(self.settings, receipt, control, timestamp(observed_at))
+        active = self._cycle_active()
         missing = not paused and not loaded
         control_failed = bool(control and control["status"] == "blocked")
-        attention = bool(receipt and receipt["attention_required"]) or control_failed or missing or not available
+        overdue = health['overdue']
+        attention = bool(receipt and receipt["attention_required"]) or control_failed or missing or not available or overdue
         reason = (control["error"] if control_failed else "Enabled intake service is not confirmed loaded; inspect owner launchd, then resume-schedule"
                   if missing else "Selected source absent; restore desktop sync before resume" if not available
+                  else f"Daily completion overdue: expected after {health['expected_after']}, deadline {health['completion_deadline']}. Inspect the owner receipt and launchd; do not start a duplicate cycle while one is active." if overdue
                   else receipt.get("error") if receipt else None)
-        return {"schema": SCHEMA, "generated_at": now(), "source_access": "available" if available else "unavailable",
+        return {"schema": SCHEMA, "generated_at": observed_at, "source_access": "available" if available else "unavailable",
             "sync_freshness": "unknown", "capture": self.store.status(), "units": [{
                 "unit_id": "remarkable:thought-intake", "label": LABEL, "title": "Remarkable thoughts",
                 "declared_enabled": not paused, "effective_enabled": loaded and not paused,
                 "schedule": f"Daily {self.settings['hour']:02}:{self.settings['minute']:02} {self.settings['timezone']}",
-                "lifecycle": "paused" if paused else "stuck" if attention else "recovering" if receipt and receipt["status"] == "recovering" else "idle",
+                "next_fire": health['next_fire'],
+                "lifecycle": "paused" if paused else "stuck" if attention else "recovering" if receipt and receipt["status"] == "recovering" else "running" if active else "idle",
+                "attention_key": "remarkable:thought-intake",
+                "attention_class": "system_attention" if attention else "none",
+                "attention_exit": "A current intake completes successfully, or the owner explicitly pauses the schedule." if overdue else "",
+                "attention_mover": "Remarkable runtime" if attention else "",
+                "findings": ["stale_last_run", reason] if overdue else [],
                 "last_run_status": receipt["status"] if receipt else "not_run",
                 "last_run_at": receipt["finished_at"] if receipt else None,
                 "available_actions": ["run-now", "pause-schedule", "resume-schedule"],
                 "action_requirements": {"run-now": {"requires_confirmation": True, "reason": "May make bounded Broker reads and publish private project extracts."}},
                 "last": {"domain": {"attention_required": attention,
-                                    "status": "activation_failed" if control_failed else "service_missing" if missing else receipt["status"] if receipt else "not_run",
+                                    "status": "activation_failed" if control_failed else "service_missing" if missing else "completion_overdue" if overdue else receipt["status"] if receipt else "not_run",
                                     "reason": reason},
                          "transport": {"owner_alert_sent": False}},
                 "human_action": reason if attention else "",
-                "details": {"service_loaded": loaded, "control_receipt": str(self.control_path), "source_access": "available" if available else "unavailable", "sync_freshness": "unknown", "receipt": str(self.receipt_path)},
+                "details": [{"service_loaded": loaded, "cycle_active": active, "control_receipt": str(self.control_path), "source_access": "available" if available else "unavailable", "sync_freshness": "unknown", "receipt": str(self.receipt_path), **health}],
                 "compute": {"llm_usage": "conditional", "brokered": True, "metering": "covered", "cost_class": "medium"}}]}
+
+    def _cycle_active(self):
+        try:
+            with (self.store.directory / '.refresh.lock').open('rb') as file:
+                try:
+                    fcntl.flock(file, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    return True
+                fcntl.flock(file, fcntl.LOCK_UN)
+        except FileNotFoundError:
+            pass
+        return False
 
     def install(self, load=False):
         if sys.platform != "darwin":

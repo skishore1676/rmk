@@ -82,6 +82,26 @@ source access. Lathi invokes these same owner controls and projects owner status
 Status distinguishes current file access from unknown tablet freshness and shows
 unselected baseline history explicitly. Quiet publication recovery does not page.
 
+The app's status command also checks the latest daily completion expectation.
+`completion_grace_minutes` is optional (default 30; allowed 1–59). With the
+06:00 Central schedule, completion is expected by 06:30, before Pex's 07:00
+planning cutoff. A missing, crashed or unfinished cycle cannot hide behind an
+older success and a still-loaded service: after the budget expires the owner
+emits `stale_last_run`, `completion_overdue`, and `attention_required=true`.
+Active work is identified without interrupting it or launching another cycle.
+Recovery is quiet before the deadline; an expired completion budget is an
+app-owned temporal failure even if the current bounded operation is finishing.
+Pausing suppresses daily expectations, and activation after a scheduled fire
+waits for the next fire. Expectations use the configured IANA timezone across
+DST; future or timezone-less receipts cannot count as completion.
+
+The existing Lathi external-source loop projects the same attention identity
+to Tower B-04 and the root Blackboard's System Attention. Chowkidar owns rare
+Beacon escalation according to its existing policy; rmk adds no notifier,
+watcher, schedule or synthetic live alert. Structured `details` use the bridge's
+list-of-dictionaries contract so completion/deadline/receipt data survives
+normalization. Successful completion clears this temporal attention naturally.
+
 For the one-time Air-to-oldmac handoff, `Intake.adopt_reading` accepts only an
 owned successful immutable result whose notebook/page hash matches the current
 capture. It preserves original observation provenance and Broker receipt, and
