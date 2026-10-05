@@ -12,7 +12,9 @@ from rmk.runtime import Runtime, SCHEMA, command
 
 
 @pytest.fixture
-def runtime(store,workspace,tmp_path):
+def runtime(store,workspace,tmp_path,monkeypatch):
+    # Existing recovery checks run within the daily completion budget.
+    monkeypatch.setattr('rmk.runtime.now', lambda:'2026-10-03T11:10:00+00:00')
     command('git','init',cwd=workspace)
     command('git','config','user.name','Synthetic Test',cwd=workspace)
     command('git','config','user.email','fixture@example.invalid',cwd=workspace)
@@ -27,6 +29,73 @@ def runtime(store,workspace,tmp_path):
         'max_storage_bytes':10000000,'timezone':'America/Chicago','hour':6,'minute':0}))
     cfg=SimpleNamespace(transport='local',root=store.root)
     return Runtime(path,cfg)
+
+
+def test_completion_deadline_surfaces_old_success_without_mutating_receipts(runtime,monkeypatch):
+    from rmk.capture import _atomic_write
+    monkeypatch.setattr(runtime,'_service_loaded',lambda:True)
+    runtime.store.directory.mkdir(parents=True,exist_ok=True)
+    old={'started_at':'2026-10-03T11:00:01+00:00','finished_at':'2026-10-03T11:00:11+00:00',
+         'status':'succeeded','attention_required':False}
+    _atomic_write(runtime.receipt_path,old)
+    original=runtime.receipt_path.read_bytes()
+    monkeypatch.setattr('rmk.runtime.now',lambda:'2026-10-04T11:29:59+00:00')
+    assert not runtime.status()['units'][0]['last']['domain']['attention_required']
+    monkeypatch.setattr('rmk.runtime.now',lambda:'2026-10-04T11:30:00+00:00')
+    unit=runtime.status()['units'][0]
+    assert unit['lifecycle']=='stuck' and unit['last']['domain']['status']=='completion_overdue'
+    assert unit['attention_class']=='system_attention' and unit['attention_key']=='remarkable:thought-intake'
+    assert unit['findings'][0]=='stale_last_run'
+    assert unit['next_fire']=='2026-10-05T06:00:00-05:00'
+    assert unit['details'][0]['completion_deadline']=='2026-10-04T06:30:00-05:00'
+    assert runtime.receipt_path.read_bytes()==original
+    _atomic_write(runtime.receipt_path,dict(old,started_at='2026-10-04T11:00:01+00:00',finished_at='2026-10-04T11:00:11+00:00'))
+    assert runtime.status()['units'][0]['attention_class']=='none'
+
+
+def test_recovery_stays_quiet_until_completion_budget_expires(runtime,monkeypatch):
+    from rmk.capture import _atomic_write
+    monkeypatch.setattr(runtime,'_service_loaded',lambda:True)
+    runtime.store.directory.mkdir(parents=True,exist_ok=True)
+    _atomic_write(runtime.receipt_path,{'status':'recovering','attention_required':False,
+        'started_at':'2026-10-03T11:00:01+00:00','finished_at':'2026-10-03T11:10:00+00:00'})
+    with runtime.lock():
+        unit=runtime.status()['units'][0]
+        assert unit['lifecycle']=='recovering' and not unit['last']['domain']['attention_required']
+        assert unit['details'][0]['cycle_active']
+        monkeypatch.setattr('rmk.runtime.now',lambda:'2026-10-03T11:30:00+00:00')
+        assert runtime.status()['units'][0]['last']['domain']['status']=='completion_overdue'
+
+
+@pytest.mark.parametrize('date,due_offset',[('2026-03-08','-05:00'),('2026-11-01','-06:00')])
+def test_daily_deadline_uses_current_dst_offset(runtime,date,due_offset):
+    from datetime import datetime
+    from rmk.runtime import schedule_health
+    observed=datetime.fromisoformat(f'{date}T06:30:00{due_offset}')
+    health=schedule_health(runtime.settings,None,None,observed)
+    assert health['expected_after']==f'{date}T06:00:00{due_offset}'
+    assert health['overdue']
+
+
+def test_pause_and_late_activation_wait_for_the_next_scheduled_fire(runtime):
+    from datetime import datetime
+    from rmk.runtime import schedule_health
+    at=datetime.fromisoformat('2026-10-04T19:00:00-05:00')
+    control={'status':'resumed','finished_at':'2026-10-04T12:40:48-05:00'}
+    assert not schedule_health(runtime.settings,None,control,at)['overdue']
+    tomorrow=at.replace(day=5,hour=6,minute=30)
+    assert schedule_health(runtime.settings,None,control,tomorrow)['overdue']
+    runtime.settings['paused']=True
+    health=schedule_health(runtime.settings,None,control,tomorrow)
+    assert not health['overdue'] and health['next_fire'] is None
+
+
+@pytest.mark.parametrize('finished',['invalid','2026-10-04T06:10:00','2026-10-05T06:10:00-05:00'])
+def test_invalid_naive_or_future_completion_cannot_hide_missing_run(runtime,finished):
+    from datetime import datetime
+    from rmk.runtime import schedule_health
+    receipt={'status':'succeeded','started_at':'2026-10-04T06:00:01-05:00','finished_at':finished}
+    assert schedule_health(runtime.settings,receipt,None,datetime.fromisoformat('2026-10-04T06:30:00-05:00'))['overdue']
 
 
 def test_paused_refresh_makes_no_capture_or_publish(runtime,monkeypatch):
