@@ -282,7 +282,8 @@ def test_transient_publication_succeeds_without_duplicate_read(runtime,monkeypat
     def wait(delay):
         x=json.loads(runtime.receipt_path.read_text());recovery.append(x)
         assert x['status']=='recovering' and not x['attention_required']
-    monkeypatch.setattr(runtime,'_publish',publish);monkeypatch.setattr(module.time,'sleep',wait)
+    # Isolate runtime waits; the shared time module also drives subprocess polling.
+    monkeypatch.setattr(runtime,'_publish',publish);monkeypatch.setattr(module,'time',SimpleNamespace(sleep=wait))
     x=runtime.refresh(reading)
     assert x['status']=='succeeded' and x['cycle_attempts']==2
     assert len(reads)==1 and publications[0]['paths']==publications[1]['paths']
@@ -335,7 +336,7 @@ def test_exhausted_transport_recovery_retains_exact_intent_and_can_catch_up(runt
         unit=runtime.status()['units'][0]
         waiting.append(unit['last']['domain']['attention_required'])
         assert unit['lifecycle']=='recovering'
-    monkeypatch.setattr(module,'command',interrupted);monkeypatch.setattr(module.time,'sleep',wait)
+    monkeypatch.setattr(module,'command',interrupted);monkeypatch.setattr(module,'time',SimpleNamespace(sleep=wait))
     result=runtime.refresh(lambda *args:pytest.fail('completed reading repeated'))
     assert result['status']=='blocked' and result['attention_required'] and result['cycle_attempts']==3
     assert waiting==[False,False] and pushes==[f"{commit}:refs/heads/{pending['branch']}"]*3
@@ -399,7 +400,7 @@ def test_uncertain_pr_creation_reconciles_existing_pr_without_duplicate_effect(r
             raise subprocess.TimeoutExpired(args,60)
         return actual_run(args,**kwargs)
     monkeypatch.setattr(module.subprocess,'run',network)
-    monkeypatch.setattr(module.time,'sleep',lambda delay:None)
+    monkeypatch.setattr(module,'time',SimpleNamespace(sleep=lambda delay:None))
     monkeypatch.setattr(runtime.intake,'confirm',lambda *args:{'status':'confirmed_on_main'})
     result=runtime.refresh(lambda *args:pytest.fail('publication retry reread source'))
     assert result['status']=='succeeded' and result['cycle_attempts']==2
