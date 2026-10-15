@@ -125,4 +125,8 @@ root = "/home/root/.local/share/remarkable/xochitl"
 # For transport = "local", point root at the desktop app store, e.g.:
 # transport = "local"
 # root = "/Users/suman/Library/Containers/com.remarkable.desktop/Data/Library/Application Support/remarkable/desktop"
+
+# Cloud push (write side) needs no config here: `rmk cloud-register --code CODE`
+# saves tokens to ~/.config/rmk/cloud-tokens.json (0600). `rmk push file.pdf`
+# then uploads it to the tablet's library.
 """

@@ -4,6 +4,10 @@
     rmk doctor               check config, SSH, renderer, and the broker
     rmk ls [--tree]          list notebooks on the tablet
     rmk pull NAME -o out.pdf render a notebook to a local PDF
+    rmk push FILE --name NAME push a PDF/EPUB to the tablet via the cloud
+    rmk cloud-register --code CODE
+                             connect this machine to the reMarkable Cloud
+    rmk cloud-status         check the cloud connection
     rmk ask  NAME "..."      ask the broker anything about a notebook
     rmk summary NAME         summarise a notebook
     rmk diagram NAME         turn a notebook into a Mermaid flow diagram
@@ -22,6 +26,7 @@ from rich.tree import Tree
 
 from . import llm, render
 from .capture import CaptureStore, default_state_dir
+from .cloud import CloudClient, CloudError
 from .config import CONFIG_TEMPLATE, Config, config_path
 from .library import Library, full_path
 from .intake import Intake, broker_reader
@@ -417,6 +422,63 @@ def diagram(
             "\n[dim]Paste this into an Obsidian ```mermaid block, or "
             "https://mermaid.live to render it.[/]"
         )
+
+
+@app.command("cloud-register")
+def cloud_register(
+    code: str = typer.Option(..., "--code", help="One-time code from my.remarkable.com/device/desktop/connect."),
+) -> None:
+    """Connect this machine to the reMarkable Cloud (one-time setup).
+
+    The code can only be used once. Tokens are saved to the private token file
+    (0600), never to the repo or the config file.
+    """
+    client = CloudClient()
+    try:
+        client.register(code)
+    except CloudError as e:
+        _fatal(str(e))
+    console.print("[green]Registered.[/] This machine can now push to the tablet.")
+
+
+@app.command("cloud-status")
+def cloud_status() -> None:
+    """Check the cloud connection: registered? token present? docs reachable?"""
+    client = CloudClient()
+    if not client.is_registered:
+        console.print("cloud: [yellow]not registered[/] — run [bold]rmk cloud-register --code CODE[/].")
+        console.print("  Get the code at https://my.remarkable.com/device/desktop/connect")
+        raise typer.Exit(1)
+    console.print("cloud: [green]registered[/] (device token saved).")
+    if not client.is_authed:
+        console.print("  user token: [yellow]missing[/] — run [bold]rmk cloud-register[/] again with a fresh code.")
+        raise typer.Exit(1)
+    try:
+        docs = client.list_documents()
+    except CloudError as e:
+        _fatal(str(e))
+    console.print(f"  user token: [green]ok[/] — {len(docs)} document(s) in the cloud.")
+
+
+@app.command()
+def push(
+    file: Path = typer.Argument(..., help="PDF or EPUB file to push to the tablet."),
+    name: str = typer.Option(None, "--name", help="Name on the tablet (default: the file's name)."),
+    parent: str = typer.Option("", "--parent", help="Parent folder ID (default: library root)."),
+) -> None:
+    """Push a PDF/EPUB to the tablet via the reMarkable Cloud.
+
+    The document appears in the tablet's library after the next sync.
+    Requires `rmk cloud-register` first.
+    """
+    client = CloudClient()
+    if not client.is_authed:
+        _fatal("Not connected to the reMarkable Cloud. Run `rmk cloud-register --code CODE` first.")
+    try:
+        meta = client.upload_file(file, name=name, parent=parent)
+    except CloudError as e:
+        _fatal(str(e))
+    console.print(f"[green]Pushed[/] [bold]{meta['VissibleName']}[/] to the tablet (cloud ID {meta['ID']}).")
 
 
 if __name__ == "__main__":

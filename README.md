@@ -93,6 +93,20 @@ actor = "reader"
 role  = "note_reader"
 ```
 
+## Push a document to the tablet (reMarkable Cloud)
+
+`rmk` can also send a file *to* the tablet — the write side. The day's page,
+a PDF, an EPUB: it lands in the tablet's library after the next sync.
+
+```bash
+rmk cloud-register --code 12345678   # one-time code from my.remarkable.com/device/desktop/connect
+rmk cloud-status                     # check the connection
+rmk push day-page.pdf --name "The Daily Suman"
+```
+
+Tokens live in `~/.config/rmk/cloud-tokens.json` (0600), never in the repo.
+The code can only be used once — get a fresh one for each machine.
+
 ## Commands
 
 | Command | What it does |
