@@ -77,14 +77,16 @@ def _client(tmp_path, script):
     return CloudClient(path=tmp_path / "cloud-tokens.json", request=FakeHTTP(script))
 
 
-def test_auth_urls_live_on_my_remarkable():
-    # Regression: the old appspot auth host 404s. Registration must hit
-    # my.remarkable.com (verified against the maintained rmapi client).
+def test_auth_urls_live_on_current_host():
+    # Regression: the auth host moved twice. The 2021 appspot host 404s, and
+    # my.remarkable.com serves the website at that path (GET 200, POST 405).
+    # Registration must hit webapp-prod.cloud.remarkable.engineering
+    # (verified against the maintained rmapi client's config/url.go).
     assert cloud_module.DEVICE_TOKEN_URL == (
-        "https://my.remarkable.com/token/json/2/device/new"
+        "https://webapp-prod.cloud.remarkable.engineering/token/json/2/device/new"
     )
     assert cloud_module.USER_TOKEN_URL == (
-        "https://my.remarkable.com/token/json/2/user/new"
+        "https://webapp-prod.cloud.remarkable.engineering/token/json/2/user/new"
     )
 
 
