@@ -52,7 +52,7 @@ USER_TOKEN_URL = AUTH_BASE_URL + "/token/json/2/user/new"
 DOCS_URL = API_BASE_URL + "/document-storage/json/2/docs"
 UPLOAD_REQUEST_URL = API_BASE_URL + "/document-storage/json/2/upload/request"
 UPDATE_STATUS_URL = API_BASE_URL + "/document-storage/json/2/upload/update-status"
-DEVICE_DESC = "desktop-windows"
+DEVICE_DESC = "desktop-linux"  # matches the maintained rmapi client
 USER_AGENT = "rmk/0.1.0"
 
 RFC3339 = "%Y-%m-%dT%H:%M:%SZ"
@@ -209,6 +209,10 @@ class CloudClient:
         if status != 200 or not resp:
             raise CloudError("Device registration failed — the code may be expired or already used. Get a fresh code and try again.")
         self.device_token = resp.decode("utf-8", "replace").strip()
+        # Save immediately: the one-time code is spent once device/new
+        # succeeds, so a later renew() failure must not lose the device token
+        # (and must not cost the user a fresh code).
+        self._save()
         self.renew()
         self._save()
 
