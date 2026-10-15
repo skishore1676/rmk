@@ -75,10 +75,15 @@ def find_rmapi() -> Path | None:
 
 
 def _rmapi_registered() -> bool:
-    """Whether rmapi has saved its own tokens (it registers separately)."""
-    return (Path.home() / ".rmapi").is_file() or (
-        Path.home() / ".config" / "rmapi" / "rmapi.conf"
-    ).is_file()
+    """Whether rmapi has saved its own tokens (it registers separately).
+
+    rmapi checks ``~/.rmapi`` first, else the OS config dir
+    (``~/Library/Application Support/rmapi/rmapi.conf`` on macOS,
+    ``~/.config/rmapi/rmapi.conf`` on Linux).
+    """
+    if (Path.home() / ".rmapi").is_file():
+        return True
+    return (Path(platformdirs.user_config_dir("rmapi")) / "rmapi.conf").is_file()
 
 
 def _default_runner(argv: list[str]):

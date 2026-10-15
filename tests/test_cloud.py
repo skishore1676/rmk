@@ -119,7 +119,16 @@ def test_renew_requires_device_token(tmp_path):
         client.renew()
 
 
-def test_upload_delegates_to_rmapi_put(tmp_path, monkeypatch):
+def test_rmapi_registered_checks_os_config_dir(tmp_path, monkeypatch):
+    # rmapi's tokens live in the OS config dir — on macOS that's
+    # ~/Library/Application Support/rmapi/rmapi.conf, not ~/.config.
+    monkeypatch.setattr(
+        cloud_module.platformdirs, "user_config_dir", lambda app: str(tmp_path / "cfg")
+    )
+    assert not cloud_module._rmapi_registered()
+    (tmp_path / "cfg").mkdir()
+    (tmp_path / "cfg" / "rmapi.conf").write_text("devicetoken: x\n")
+    assert cloud_module._rmapi_registered()
     runner = FakeRunner([(0, "uploading...OK\n", "")])
     client = _authed_client(tmp_path, runner, monkeypatch)
     pdf = tmp_path / "day.pdf"
