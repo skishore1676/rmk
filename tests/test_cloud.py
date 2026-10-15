@@ -1,62 +1,31 @@
-"""Cloud push acceptance; no network — the HTTP layer is stubbed.
+"""Cloud push acceptance; no network — the HTTP layer and rmapi are stubbed.
 
-Covers: the upload zip layout, the metadata payload, token storage (0600,
-round-trip), the register/renew/upload call sequence, and the CLI surface.
+Covers: token storage (0600, round-trip), the register/renew call sequence,
+the rmapi upload delegate (argv, name override, folder), ``rmapi ls``
+parsing, and the CLI surface.
 """
 
 import json
 import stat
-import uuid
-from io import BytesIO
 from pathlib import Path
-from zipfile import ZipFile
+from types import SimpleNamespace
 
 import pytest
 from typer.testing import CliRunner
 
 from rmk import cloud as cloud_module
 from rmk.cli import app
-from rmk.cloud import CloudClient, CloudError, build_epub_zip, build_pdf_zip
+from rmk.cloud import CloudClient, CloudError
 
 
 def fake_pdf() -> bytes:
-    # Minimal one-page PDF; pypdf counts its pages in upload_file.
+    # Minimal one-page PDF.
     return (
         b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n"
         b"2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n"
         b"3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]>>endobj\n"
         b"trailer<</Root 1 0 R>>%%EOF"
     )
-
-
-def test_pdf_zip_layout():
-    doc_id = str(uuid.uuid4())
-    blob = build_pdf_zip(doc_id, fake_pdf(), page_count=1)
-    with ZipFile(BytesIO(blob)) as zf:
-        names = sorted(zf.namelist())
-        assert names == sorted([f"{doc_id}.content", f"{doc_id}.pagedata", f"{doc_id}.pdf"])
-        content = json.loads(zf.read(f"{doc_id}.content"))
-        assert content["fileType"] == "pdf"
-        assert content["pageCount"] == 1
-        assert zf.read(f"{doc_id}.pdf") == fake_pdf()
-
-
-def test_epub_zip_layout():
-    doc_id = str(uuid.uuid4())
-    blob = build_epub_zip(doc_id, b"fake-epub-bytes")
-    with ZipFile(BytesIO(blob)) as zf:
-        assert f"{doc_id}.epub" in zf.namelist()
-        assert json.loads(zf.read(f"{doc_id}.content"))["fileType"] == "epub"
-
-
-def test_metadata_payload_uses_api_spelling():
-    from rmk.cloud import _metadata_payload
-
-    meta = _metadata_payload("id-1", "The Daily Suman", "")
-    assert meta["VissibleName"] == "The Daily Suman"  # API spelling, double s
-    assert meta["Type"] == "DocumentType"
-    assert meta["Version"] == 1
-    assert meta["Parent"] == ""
 
 
 class FakeHTTP:
@@ -73,8 +42,37 @@ class FakeHTTP:
         return self.script.pop(0)
 
 
-def _client(tmp_path, script):
-    return CloudClient(path=tmp_path / "cloud-tokens.json", request=FakeHTTP(script))
+class FakeRunner:
+    """Stub for CloudClient.runner: scripted rmapi results per call."""
+
+    def __init__(self, results):
+        self.results = list(results)
+        self.calls = []
+        self.put_contents = []  # bytes of each file handed to `rmapi put`
+
+    def __call__(self, argv):
+        self.calls.append(argv)
+        if len(argv) >= 3 and argv[1] == "put":
+            self.put_contents.append(Path(argv[2]).read_bytes())
+        if not self.results:
+            raise AssertionError(f"unexpected rmapi call: {argv}")
+        rc, out, err = self.results.pop(0)
+        return SimpleNamespace(returncode=rc, stdout=out, stderr=err)
+
+
+def _client(tmp_path, script=(), runner=None):
+    return CloudClient(
+        path=tmp_path / "cloud-tokens.json", request=FakeHTTP(script), runner=runner
+    )
+
+
+def _authed_client(tmp_path, runner, monkeypatch):
+    client = _client(tmp_path, runner=runner)
+    client.device_token = "d"
+    client.user_token = "u"
+    monkeypatch.setattr(cloud_module, "find_rmapi", lambda: Path("/bin/rmapi"))
+    monkeypatch.setattr(cloud_module, "_rmapi_registered", lambda: True)
+    return client
 
 
 def test_auth_urls_live_on_current_host():
@@ -121,49 +119,93 @@ def test_renew_requires_device_token(tmp_path):
         client.renew()
 
 
-def test_upload_sequence_new_document(tmp_path):
-    put_url = "https://blob.example/upload-here"
-    http = FakeHTTP([
-        (200, json.dumps([{"BlobURLPut": put_url}]).encode()),
-        (200, b""),
-        (200, json.dumps([{"Success": True}]).encode()),
-    ])
-    client = _client(tmp_path, [])
-    client.device_token = "d"
-    client.user_token = "u"
-    client._request = http
+def test_upload_delegates_to_rmapi_put(tmp_path, monkeypatch):
+    runner = FakeRunner([(0, "uploading...OK\n", "")])
+    client = _authed_client(tmp_path, runner, monkeypatch)
+    pdf = tmp_path / "day.pdf"
+    pdf.write_bytes(fake_pdf())
+    meta = client.upload_file(pdf)
+    assert meta["name"] == "day"
+    assert runner.calls == [["/bin/rmapi", "put", str(pdf)]]
+
+
+def test_upload_name_override_stages_renamed_copy(tmp_path, monkeypatch):
+    runner = FakeRunner([(0, "uploading...OK\n", "")])
+    client = _authed_client(tmp_path, runner, monkeypatch)
     pdf = tmp_path / "day.pdf"
     pdf.write_bytes(fake_pdf())
     meta = client.upload_file(pdf, name="The Daily Suman")
-    assert meta["VissibleName"] == "The Daily Suman"
-    assert meta["Version"] == 1
-    # 1) upload request names the new doc, 2) blob PUT hits the signed URL,
-    # 3) metadata publishes the name.
-    assert http.calls[0][0] == "PUT" and "upload/request" in http.calls[0][1]
-    assert http.calls[1][0] == "PUT" and http.calls[1][1] == put_url
-    assert http.calls[2][0] == "PUT" and "update-status" in http.calls[2][1]
-    assert json.loads(http.calls[2][2])[0]["VissibleName"] == "The Daily Suman"
-    # The blob PUT carries a valid zip with the PDF inside.
-    with ZipFile(BytesIO(http.calls[1][2])) as zf:
-        assert any(n.endswith(".pdf") for n in zf.namelist())
+    assert meta["name"] == "The Daily Suman"
+    staged = runner.calls[0][2]
+    assert staged.endswith("The Daily Suman.pdf")
+    assert runner.put_contents == [fake_pdf()]
 
 
-def test_upload_rejects_non_pdf_epub(tmp_path):
-    client = _client(tmp_path, [])
-    client.device_token = "d"
-    client.user_token = "u"
+def test_upload_parent_passes_folder(tmp_path, monkeypatch):
+    runner = FakeRunner([(0, "uploading...OK\n", "")])
+    client = _authed_client(tmp_path, runner, monkeypatch)
+    pdf = tmp_path / "day.pdf"
+    pdf.write_bytes(fake_pdf())
+    client.upload_file(pdf, parent="/Personal")
+    assert runner.calls == [["/bin/rmapi", "put", str(pdf), "/Personal"]]
+
+
+def test_upload_rejects_non_pdf_epub(tmp_path, monkeypatch):
+    runner = FakeRunner([])
+    client = _authed_client(tmp_path, runner, monkeypatch)
     txt = tmp_path / "notes.txt"
     txt.write_text("hello")
     with pytest.raises(CloudError, match="Only .pdf and .epub"):
         client.upload_file(txt)
+    assert runner.calls == []
 
 
-def test_upload_requires_auth(tmp_path):
-    client = _client(tmp_path, [])
+def test_upload_requires_auth(tmp_path, monkeypatch):
+    runner = FakeRunner([])
+    client = _client(tmp_path, runner=runner)
+    monkeypatch.setattr(cloud_module, "find_rmapi", lambda: Path("/bin/rmapi"))
+    monkeypatch.setattr(cloud_module, "_rmapi_registered", lambda: True)
     pdf = tmp_path / "day.pdf"
     pdf.write_bytes(fake_pdf())
     with pytest.raises(CloudError, match="cloud-register"):
         client.upload_file(pdf)
+    assert runner.calls == []
+
+
+def test_upload_requires_rmapi_registered(tmp_path, monkeypatch):
+    runner = FakeRunner([])
+    client = _client(tmp_path, runner=runner)
+    client.device_token = "d"
+    client.user_token = "u"
+    monkeypatch.setattr(cloud_module, "find_rmapi", lambda: Path("/bin/rmapi"))
+    monkeypatch.setattr(cloud_module, "_rmapi_registered", lambda: False)
+    pdf = tmp_path / "day.pdf"
+    pdf.write_bytes(fake_pdf())
+    with pytest.raises(CloudError, match="rmapi is not registered"):
+        client.upload_file(pdf)
+    assert runner.calls == []
+
+
+def test_upload_reports_rmapi_failure(tmp_path, monkeypatch):
+    runner = FakeRunner([(1, "", "boom\n")])
+    client = _authed_client(tmp_path, runner, monkeypatch)
+    pdf = tmp_path / "day.pdf"
+    pdf.write_bytes(fake_pdf())
+    with pytest.raises(CloudError, match="rmapi put .* failed: boom"):
+        client.upload_file(pdf)
+
+
+def test_list_documents_parses_rmapi_ls(tmp_path, monkeypatch):
+    runner = FakeRunner([(0, "[f]\tCalendar\n[d]\tPersonal\n", "")])
+    client = _client(tmp_path, runner=runner)
+    monkeypatch.setattr(cloud_module, "find_rmapi", lambda: Path("/bin/rmapi"))
+    monkeypatch.setattr(cloud_module, "_rmapi_registered", lambda: True)
+    docs = client.list_documents()
+    assert docs == [
+        {"kind": "[f]", "name": "Calendar"},
+        {"kind": "[d]", "name": "Personal"},
+    ]
+    assert runner.calls == [["/bin/rmapi", "ls"]]
 
 
 def test_cli_push_without_registration(tmp_path, monkeypatch):

@@ -35,7 +35,6 @@ which owns provider selection / failover / receipts and runs the logged-in
 1. **transport** — read the tablet's document store. Two implementations today:
    `local` (the **reMarkable desktop app**'s synced folder on this Mac — no
    tablet needed) and `ssh` (USB/Wi-Fi to a physical tablet at `10.11.99.1`).
-   The interface is swappable, so the reMarkable Cloud API can slot in later.
 2. **library** — turn the flat UUID store into named notebooks and resolve
    `"Roadmap"` (or a path, or a UUID) to the right one.
 3. **render** — `rmc`/`rmscene` convert the `.rm` v6 strokes to a PDF; `pypdfium2`
@@ -106,6 +105,12 @@ rmk push day-page.pdf --name "The Daily Suman"
 
 Tokens live in `~/.config/rmk/cloud-tokens.json` (0600), never in the repo.
 The code can only be used once — get a fresh one for each machine.
+
+Uploads go through the maintained [ddvk/rmapi](https://github.com/ddvk/rmapi)
+fork, which speaks the tablet's current sync protocol (the older v2
+document-storage API is retired, and the original rmapi's v2 sync path is
+stale). rmapi keeps its own tokens, so the first time it runs it needs its
+own one-time code: run `rmapi ls` and enter a fresh code when prompted.
 
 ## Commands
 

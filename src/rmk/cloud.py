@@ -1,42 +1,40 @@
-"""Native reMarkable Cloud connection: push a PDF/EPUB onto the tablet.
+"""Native reMarkable Cloud connection: register this machine, push via rmapi.
 
 This is the write side rmk was missing. The read side (``transport``) pulls
-notes *off* the tablet; this module pushes a document *onto* it through the
-same cloud sync the official apps use, so it shows up in the tablet's library
-without USB or SSH.
+notes *off* the tablet; this module connects the machine to the cloud and
+pushes a document *onto* it, so it shows up in the tablet's library without
+USB or SSH.
 
 Auth (two steps, from the public rmapy reference implementation):
 1. Register a device with a one-time code from
    https://my.remarkable.com/device/desktop/connect -> device token.
-2. Exchange the device token for a user token, used for all API calls.
+2. Exchange the device token for a user token, used for API calls.
 
-Upload (three steps):
-1. Build the reMarkable zip: ``<uuid>.content`` (JSON), ``<uuid>.pagedata``,
-   ``<uuid>.pdf`` (or ``.epub``).
-2. Ask the cloud for a blob upload URL (``upload/request``).
-3. PUT the zip to that URL, then publish the metadata (``upload/update-status``).
+Upload goes through the maintained ``rmapi`` tool (ddvk/rmapi fork), which
+speaks the current sync protocol (v3/v4). The older v2 document-storage API
+is retired (it 404s), and the original rmapi's v2 sync path returns 410 —
+so rmk does not implement upload itself; it delegates to ``rmapi put``.
+rmapi keeps its own token store (``~/.rmapi`` or ``~/.config/rmapi/``),
+so it needs its own one-time registration the first time it runs.
 
 Tokens live in ``~/.config/rmk/cloud-tokens.json`` (0600), never in the repo
 and never in ``config.toml``. Only the standard library is used for HTTP, so
-no new dependency. Tests stub the HTTP layer; nothing here touches the network
-unless a command runs.
-
-Field names follow the cloud API exactly — including ``VissibleName`` (the
-API's own spelling, double ``s``).
+no new dependency. Tests stub the HTTP layer and the rmapi runner; nothing
+here touches the network unless a command runs.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
+import subprocess
+import tempfile
 import urllib.error
 import urllib.request
 import uuid
-from datetime import datetime, timezone
-from io import BytesIO
 from pathlib import Path
-from zipfile import ZipFile, ZIP_DEFLATED
 
 import platformdirs
 
@@ -46,16 +44,10 @@ AUTH_BASE_URL = "https://webapp-prod.cloud.remarkable.engineering"
 # there (GET 200, POST 405). The live auth host is
 # webapp-prod.cloud.remarkable.engineering (verified against the maintained
 # rmapi client's config/url.go).
-API_BASE_URL = "https://document-storage-production-dot-remarkable-production.appspot.com"
 DEVICE_TOKEN_URL = AUTH_BASE_URL + "/token/json/2/device/new"
 USER_TOKEN_URL = AUTH_BASE_URL + "/token/json/2/user/new"
-DOCS_URL = API_BASE_URL + "/document-storage/json/2/docs"
-UPLOAD_REQUEST_URL = API_BASE_URL + "/document-storage/json/2/upload/request"
-UPDATE_STATUS_URL = API_BASE_URL + "/document-storage/json/2/upload/update-status"
 DEVICE_DESC = "desktop-linux"  # matches the maintained rmapi client
 USER_AGENT = "rmk/0.1.0"
-
-RFC3339 = "%Y-%m-%dT%H:%M:%SZ"
 
 
 class CloudError(Exception):
@@ -67,76 +59,31 @@ def token_path() -> Path:
     return Path(platformdirs.user_config_dir("rmk")) / "cloud-tokens.json"
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).strftime(RFC3339)
+def find_rmapi() -> Path | None:
+    """Locate the rmapi binary: PATH first, then the usual install spots."""
+    on_path = shutil.which("rmapi")
+    if on_path:
+        return Path(on_path)
+    for candidate in (
+        Path.home() / "go" / "bin" / "rmapi",
+        Path("/opt/homebrew/bin/rmapi"),
+        Path("/usr/local/bin/rmapi"),
+    ):
+        if candidate.is_file():
+            return candidate
+    return None
 
 
-def build_pdf_zip(doc_id: str, pdf_bytes: bytes, page_count: int = 1) -> bytes:
-    """Build the reMarkable zip for a PDF document.
-
-    Layout (matches what the cloud expects for an uploaded PDF):
-    ``<uuid>.content`` — JSON describing the document,
-    ``<uuid>.pagedata`` — empty page data,
-    ``<uuid>.pdf`` — the PDF itself.
-    """
-    content = {
-        "extraMetadata": {},
-        "fileType": "pdf",
-        "pageCount": page_count,
-        "lastOpenedPage": 0,
-        "lineHeight": -1,
-        "margins": 180,
-        "textScale": 1,
-        "transform": {},
-    }
-    buf = BytesIO()
-    with ZipFile(buf, "w", ZIP_DEFLATED) as zf:
-        zf.writestr(f"{doc_id}.content", json.dumps(content))
-        zf.writestr(f"{doc_id}.pagedata", "")
-        zf.writestr(f"{doc_id}.pdf", pdf_bytes)
-    buf.seek(0)
-    return buf.read()
+def _rmapi_registered() -> bool:
+    """Whether rmapi has saved its own tokens (it registers separately)."""
+    return (Path.home() / ".rmapi").is_file() or (
+        Path.home() / ".config" / "rmapi" / "rmapi.conf"
+    ).is_file()
 
 
-def build_epub_zip(doc_id: str, epub_bytes: bytes) -> bytes:
-    """Build the reMarkable zip for an EPUB document."""
-    content = {
-        "extraMetadata": {},
-        "fileType": "epub",
-        "pageCount": 0,
-        "lastOpenedPage": 0,
-        "lineHeight": -1,
-        "margins": 180,
-        "textScale": 1,
-        "transform": {},
-    }
-    buf = BytesIO()
-    with ZipFile(buf, "w", ZIP_DEFLATED) as zf:
-        zf.writestr(f"{doc_id}.content", json.dumps(content))
-        zf.writestr(f"{doc_id}.pagedata", "")
-        zf.writestr(f"{doc_id}.epub", epub_bytes)
-    buf.seek(0)
-    return buf.read()
-
-
-def _metadata_payload(doc_id: str, name: str, parent: str) -> dict:
-    """The update-status body for a brand-new document (Version 1)."""
-    return {
-        "ID": doc_id,
-        "Version": 1,
-        "Message": "",
-        "Success": True,
-        "BlobURLGet": "",
-        "BlobURLGetExpires": "",
-        "BlobURLPut": "",
-        "BlobURLPutExpires": "",
-        "ModifiedClient": _now(),
-        "Type": "DocumentType",
-        "VissibleName": name,
-        "CurrentPage": 1,
-        "Bookmarked": False,
-        "Parent": parent,
-    }
+def _default_runner(argv: list[str]):
+    """Run rmapi and capture output (injectable for tests)."""
+    return subprocess.run(argv, capture_output=True, text=True, timeout=180)
 
 
 def _default_request(method: str, url: str, body: bytes | None, headers: dict) -> tuple[int, bytes]:
@@ -156,11 +103,12 @@ def _default_request(method: str, url: str, body: bytes | None, headers: dict) -
 
 
 class CloudClient:
-    """A reMarkable Cloud session. ``request`` is injectable for tests."""
+    """A reMarkable Cloud session. ``request``/``runner`` injectable for tests."""
 
-    def __init__(self, path: Path | None = None, request=None):
+    def __init__(self, path: Path | None = None, request=None, runner=None):
         self._path = path or token_path()
         self._request = request or _default_request
+        self._runner = runner or _default_runner
         self.device_token: str = ""
         self.user_token: str = ""
         self._load()
@@ -229,71 +177,69 @@ class CloudClient:
         self.user_token = resp.decode("utf-8", "replace").strip()
         self._save()
 
-    def _authed(self, method: str, url: str, body: bytes | None = None) -> tuple[int, bytes]:
-        if not self.user_token:
-            raise CloudError("No user token. Run `rmk cloud-register` first.")
-        headers = {"Authorization": f"Bearer {self.user_token}", "User-Agent": USER_AGENT}
-        if body is not None:
-            headers["Content-Type"] = "application/json"
-        return self._request(method, url, body, headers)
+    # -- documents (via rmapi) ---------------------------------------------
+    def _rmapi(self) -> Path:
+        """The rmapi binary, or a clear error telling the user to install it."""
+        rmapi = find_rmapi()
+        if rmapi is None:
+            raise CloudError(
+                "rmapi not found. Install the maintained ddvk/rmapi fork "
+                "(e.g. `go install` from github.com/ddvk/rmapi) and make sure "
+                "it is on PATH or in ~/go/bin."
+            )
+        return rmapi
 
-    # -- documents ----------------------------------------------------------
+    def _run_rmapi(self, *args: str):
+        """Run rmapi, raising CloudError (with its output) on failure."""
+        result = self._runner([str(self._rmapi()), *args])
+        if result.returncode != 0:
+            raise CloudError(f"rmapi {' '.join(args)} failed: {(result.stderr or result.stdout or '').strip()}")
+        return result
+
     def list_documents(self) -> list[dict]:
-        """All documents/folders in the cloud (metadata only)."""
-        status, resp = self._authed("GET", DOCS_URL)
-        if status != 200:
-            raise CloudError(f"Listing documents failed (HTTP {status}).")
-        return json.loads(resp.decode("utf-8", "replace"))
+        """Top-level documents/folders in the cloud (names only)."""
+        if not _rmapi_registered():
+            raise CloudError("rmapi is not registered yet — run `rmapi ls` and enter a fresh one-time code when prompted.")
+        result = self._run_rmapi("ls")
+        docs = []
+        for line in (result.stdout or "").splitlines():
+            if line.startswith(("[f]", "[d]")) and "\t" in line:
+                kind, name = line.split("\t", 1)
+                docs.append({"kind": kind, "name": name.strip()})
+        return docs
 
     def upload_file(self, path: str | Path, name: str | None = None, parent: str = "") -> dict:
-        """Upload a PDF or EPUB file as a new document. Returns its metadata."""
+        """Upload a PDF or EPUB file as a new document via ``rmapi put``.
+
+        rmapi names the document after the file, so a ``--name`` that differs
+        from the file's stem uploads a temp copy under that name. ``parent``
+        is an rmapi folder path (default: library root). Returns the
+        document's name and local path.
+        """
         p = Path(path)
         if not p.is_file():
             raise CloudError(f"No such file: {p}")
-        raw = p.read_bytes()
-        suffix = p.suffix.lower()
-        doc_id = str(uuid.uuid4())
-        if suffix == ".pdf":
-            try:
-                from pypdf import PdfReader
-
-                page_count = len(PdfReader(BytesIO(raw)).pages)
-            except Exception:
-                page_count = 1
-            blob = build_pdf_zip(doc_id, raw, page_count)
-        elif suffix == ".epub":
-            blob = build_epub_zip(doc_id, raw)
-        else:
+        if p.suffix.lower() not in (".pdf", ".epub"):
             raise CloudError(f"Only .pdf and .epub can be pushed (got {p.suffix}).")
+        if not self.is_authed:
+            raise CloudError("Not connected to the reMarkable Cloud. Run `rmk cloud-register --code CODE` first.")
+        if not _rmapi_registered():
+            raise CloudError("rmapi is not registered yet — run `rmapi ls` and enter a fresh one-time code when prompted.")
         display = name or p.stem
-        return self._upload_blob(doc_id, blob, display, parent)
+        if display == p.stem:
+            self._upload_via_rmapi(p, parent)
+        else:
+            with tempfile.TemporaryDirectory(prefix="rmk-push-") as tmp:
+                staged = Path(tmp) / f"{display}{p.suffix}"
+                staged.write_bytes(p.read_bytes())
+                self._upload_via_rmapi(staged, parent)
+        return {"name": display, "path": str(p)}
 
-    def _upload_blob(self, doc_id: str, blob: bytes, name: str, parent: str) -> dict:
-        # 1. Ask for a blob upload URL.
-        req_body = json.dumps([{"ID": doc_id, "Type": "DocumentType", "Version": 1}]).encode()
-        status, resp = self._authed("PUT", UPLOAD_REQUEST_URL, req_body)
-        if status != 200:
-            raise CloudError(f"Upload request failed (HTTP {status}).")
-        try:
-            put_url = json.loads(resp.decode("utf-8", "replace"))[0]["BlobURLPut"]
-        except (KeyError, IndexError, json.JSONDecodeError) as e:
-            raise CloudError("Upload request returned no blob URL.") from e
-        # 2. PUT the zip to the blob URL (no auth header — the URL is signed).
-        status, _ = self._request("PUT", put_url, blob, {"Content-Type": "application/octet-stream"})
-        if status not in (200, 201, 204):
-            raise CloudError(f"Blob upload failed (HTTP {status}).")
-        # 3. Publish the metadata.
-        meta = _metadata_payload(doc_id, name, parent)
-        status, resp = self._authed("PUT", UPDATE_STATUS_URL, json.dumps([meta]).encode())
-        if status != 200:
-            raise CloudError(f"Publishing metadata failed (HTTP {status}).")
-        try:
-            result = json.loads(resp.decode("utf-8", "replace"))[0]
-        except (KeyError, IndexError, json.JSONDecodeError) as e:
-            raise CloudError("Metadata update returned an unexpected response.") from e
-        if not result.get("Success", False):
-            raise CloudError(f"Cloud rejected the upload: {result.get('Message', 'unknown reason')}")
-        return meta
+    def _upload_via_rmapi(self, file: Path, parent: str) -> None:
+        argv = ["put", str(file)]
+        if parent:
+            argv.append(parent)
+        self._run_rmapi(*argv)
 
 
 def token_file_mode(path: Path) -> int:

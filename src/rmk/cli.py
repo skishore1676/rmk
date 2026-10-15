@@ -443,7 +443,9 @@ def cloud_register(
 
 @app.command("cloud-status")
 def cloud_status() -> None:
-    """Check the cloud connection: registered? token present? docs reachable?"""
+    """Check the cloud connection: registered? rmapi ready? docs reachable?"""
+    from .cloud import _rmapi_registered, find_rmapi
+
     client = CloudClient()
     if not client.is_registered:
         console.print("cloud: [yellow]not registered[/] — run [bold]rmk cloud-register --code CODE[/].")
@@ -453,23 +455,30 @@ def cloud_status() -> None:
     if not client.is_authed:
         console.print("  user token: [yellow]missing[/] — run [bold]rmk cloud-register[/] again with a fresh code.")
         raise typer.Exit(1)
+    console.print("  user token: [green]ok[/].")
+    if find_rmapi() is None:
+        console.print("  rmapi: [yellow]not installed[/] — uploads need the ddvk/rmapi fork.")
+        raise typer.Exit(1)
+    if not _rmapi_registered():
+        console.print("  rmapi: [yellow]not registered[/] — run [bold]rmapi ls[/] and enter a fresh one-time code when prompted.")
+        raise typer.Exit(1)
     try:
         docs = client.list_documents()
     except CloudError as e:
         _fatal(str(e))
-    console.print(f"  user token: [green]ok[/] — {len(docs)} document(s) in the cloud.")
+    console.print(f"  rmapi: [green]ready[/] — {len(docs)} top-level entr(y/ies) in the cloud.")
 
 
 @app.command()
 def push(
     file: Path = typer.Argument(..., help="PDF or EPUB file to push to the tablet."),
     name: str = typer.Option(None, "--name", help="Name on the tablet (default: the file's name)."),
-    parent: str = typer.Option("", "--parent", help="Parent folder ID (default: library root)."),
+    parent: str = typer.Option("", "--parent", help="Destination folder in the library, as an rmapi path (default: root)."),
 ) -> None:
-    """Push a PDF/EPUB to the tablet via the reMarkable Cloud.
+    """Push a PDF/EPUB to the tablet via rmapi.
 
     The document appears in the tablet's library after the next sync.
-    Requires `rmk cloud-register` first.
+    Requires `rmk cloud-register` first (plus rmapi's own one-time setup).
     """
     client = CloudClient()
     if not client.is_authed:
@@ -478,7 +487,7 @@ def push(
         meta = client.upload_file(file, name=name, parent=parent)
     except CloudError as e:
         _fatal(str(e))
-    console.print(f"[green]Pushed[/] [bold]{meta['VissibleName']}[/] to the tablet (cloud ID {meta['ID']}).")
+    console.print(f"[green]Pushed[/] [bold]{meta['name']}[/] to the tablet.")
 
 
 if __name__ == "__main__":
