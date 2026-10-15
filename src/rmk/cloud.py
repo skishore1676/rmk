@@ -40,7 +40,11 @@ from zipfile import ZipFile, ZIP_DEFLATED
 
 import platformdirs
 
-AUTH_BASE_URL = "https://webapp-production-dot-remarkable-production.appspot.com"
+AUTH_BASE_URL = "https://my.remarkable.com"
+# NOTE (2026-10-14): the older appspot auth host
+# (webapp-production-dot-remarkable-production.appspot.com) now 404s on
+# /token/json/2/device/new. The live endpoints live on my.remarkable.com
+# (verified against the maintained rmapi client).
 API_BASE_URL = "https://document-storage-production-dot-remarkable-production.appspot.com"
 DEVICE_TOKEN_URL = AUTH_BASE_URL + "/token/json/2/device/new"
 USER_TOKEN_URL = AUTH_BASE_URL + "/token/json/2/user/new"

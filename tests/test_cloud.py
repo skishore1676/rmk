@@ -77,6 +77,17 @@ def _client(tmp_path, script):
     return CloudClient(path=tmp_path / "cloud-tokens.json", request=FakeHTTP(script))
 
 
+def test_auth_urls_live_on_my_remarkable():
+    # Regression: the old appspot auth host 404s. Registration must hit
+    # my.remarkable.com (verified against the maintained rmapi client).
+    assert cloud_module.DEVICE_TOKEN_URL == (
+        "https://my.remarkable.com/token/json/2/device/new"
+    )
+    assert cloud_module.USER_TOKEN_URL == (
+        "https://my.remarkable.com/token/json/2/user/new"
+    )
+
+
 def test_register_saves_tokens_with_private_perms(tmp_path):
     http = FakeHTTP([(200, b"device-token-abc"), (200, b"user-token-xyz")])
     client = CloudClient(path=tmp_path / "cloud-tokens.json", request=http)
