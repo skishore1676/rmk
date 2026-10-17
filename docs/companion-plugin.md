@@ -25,6 +25,36 @@ skill, and a standalone Python server package. Its default transport is local
 stdio. Saving or installing this package does not start a service on another
 Mac or make the tools available to web chat, mobile, or Pex.
 
+### Preserve the existing Air account installation
+
+The generic local-stdio archive is not a replacement for the existing Air
+account package. In that account's release normalization, a portable root
+`plugin.json` took precedence over `.codex-plugin/plugin.json`; the saved
+installed-plugin descriptor had no MCP servers even though the SSH server
+worked directly. The first 0.2 account refresh reintroduced this regression.
+Version metadata and a successful direct SSH probe did not establish that the
+installed plugin could discover or call tools.
+
+The verified account installation uses **only** the compatibility manifest
+`.codex-plugin/plugin.json`, with `skills: "./skills"` and
+`mcpServers: "./.mcp.json"`. It has no root `plugin.json`. Both `.mcp.json` and
+`mcp.json` retain the existing authenticated SSH stdio command. The SSH entry
+has no `cwd`: `${PLUGIN_ROOT}` is not a valid remote working directory. Pass
+the approved `RMK_MCP_NOTEBOOK_IDS` JSON as an argument to remote `env` in the
+SSH command; a local SSH environment alone is not forwarded to the remote
+process by this installation. Keep the existing identity, host verification,
+Python launcher, runtime configuration and selected UUIDs. Do not change SSH
+forwarding policy or create a new listener to solve package discovery.
+
+For every account package refresh, preserve this overlay rather than uploading
+the generic archive unchanged. Read back the saved release, check this
+manifest topology and the exact launcher/selection, then refresh the actual
+installed plugin without MCP overrides. Require discovery of all nine tools,
+the intended running version and PDF support, and one complete pinned read.
+Do not advance checkpoints as a connection probe. Renderer qualification and
+its conservative metadata coverage are recorded in
+[SceneInfo qualification](sceneinfo-qualification.md).
+
 ## Tool contract
 
 | Tool | Inputs | Result and expected use |

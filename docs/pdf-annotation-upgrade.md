@@ -14,6 +14,12 @@ runtime file, daily schedule, Broker/Pulsar configuration, posting state and
 reader checkpoints. Do not replace the deployed MCP configuration with the
 repository's generic local-stdio example.
 
+Before refreshing the saved account package, follow the manifest-normalization
+regression and proven compatibility-only layout in
+[the Air installation notes](companion-plugin.md#preserve-the-existing-air-account-installation).
+The generic archive must retain the deployment-specific overlay; otherwise a
+refresh can save successfully while removing installed MCP discovery.
+
 Use an isolated checkout if the host's source has unrelated edits. Fetch the
 reviewed version from `skishore1676/rmk`, branch
 `codex/remarkable-companion-plugin`, PR #7. Record the exact fetched commit.
