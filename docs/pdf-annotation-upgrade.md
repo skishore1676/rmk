@@ -25,7 +25,7 @@ dependency and this release adds no new runtime dependencies.
 
 Reload the existing Companion MCP session after deploying the server. Confirm
 that discovery still exposes nine tools, then call `remarkable_status` and
-require version `0.2.0`, `pdf` in `supported_document_types`, and the expected
+require version `0.2.1`, `pdf` in `supported_document_types`, and the expected
 existing source/selection. Stop if the running process still reports an older
 version; do not infer a successful host upgrade from the account plugin version.
 

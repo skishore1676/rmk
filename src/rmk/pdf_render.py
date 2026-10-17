@@ -12,7 +12,6 @@ import io
 import math
 from pathlib import Path
 import re
-import struct
 
 from PIL import Image
 import pypdfium2 as pdfium
@@ -20,8 +19,9 @@ from reportlab.graphics import renderPDF
 from svglib.svglib import svg2rlg
 
 from .render import tile_ranges
+from .scene_info import SceneInfoError, parse_scene_info
 
-PDF_RENDER_VERSION = "pdf-v6-tiles-v1"
+PDF_RENDER_VERSION = "pdf-v6-tiles-v2"
 SCALE = 72.0 / 226.0
 RASTER_SCALE = 3
 MAX_PAGE_PIXELS = 40_000_000
@@ -58,23 +58,18 @@ def _annotation_layer(data):
     from rmscene.text import TextDocument
 
     blocks = list(read_blocks(io.BytesIO(data)))
+    scene_metadata = []
     for block in blocks:
         if isinstance(block, UnreadableBlock):
             raise PdfError("An annotation uses an unknown or damaged v6 block. Export the annotated PDF from reMarkable for this page.", "unsupported_pdf_annotations")
         if isinstance(block, SceneInfo):
             if block.root_document_visible is not None and not block.root_document_visible.value:
                 raise PdfError("This page hides its PDF background; this layout needs a separate review.")
-            # rmscene 0.6 retains the newer paper-size subblock as extra_data.
-            # Accept only its documented tag 5, eight-byte uint32 pair and the
-            # existing 1404x1872 logical grid. Do not guess Paper Pro scaling.
-            extra = block.extra_data
-            paper = getattr(block, "paper_size", None)
-            if extra:
-                if len(extra) != 13 or extra[:5] != b"\x5c\x08\x00\x00\x00":
-                    raise PdfError("The annotation has an unsupported scene layout.", "unsupported_pdf_annotations")
-                paper = struct.unpack("<II", extra[5:])
-            if paper is not None and tuple(paper) != (1404, 1872):
-                raise PdfError("This annotation uses a paper coordinate grid that needs device calibration.", "unsupported_pdf_annotations")
+            try:
+                metadata = parse_scene_info(block.extra_data, getattr(block, "paper_size", None))
+            except SceneInfoError as exc:
+                raise PdfError(str(exc), "unsupported_pdf_annotations") from None
+            scene_metadata.append(metadata.describe())
         elif (isinstance(block, (SceneTextItemBlock, SceneTombstoneItemBlock)) or getattr(block, "extra_value_data", b"")
               or (block.extra_data and block.get_block_type() in (1, 2, 3, 4, 5, 6, 7, 8))):
             raise PdfError("The annotation has an unsupported text or drawing extension.", "unsupported_pdf_annotations")
@@ -140,7 +135,7 @@ def _annotation_layer(data):
         raise PdfError("An annotation has invalid stroke widths.", "unsupported_pdf_annotations")
     padding = max([12.0, *[width / 2 + 2 for width in widths]])
     box = (min(xs)-padding, min(ys)-padding, max(xs)+padding, max(ys)+padding) if xs else None
-    return body, box
+    return body, box, scene_metadata
 
 
 def _raster_page(page, *, transparent=False):
@@ -172,7 +167,7 @@ def render_pdf_tiles(pdf_bytes, pdf_page_index, annotation_bytes, output: Path):
                     background = _raster_page(page)
                 finally:
                     page.close()
-        body, ink_box = _annotation_layer(annotation_bytes) if annotation_bytes is not None else ("", None)
+        body, ink_box, scene_metadata = _annotation_layer(annotation_bytes) if annotation_bytes is not None else ("", None, [])
         left, top, right, bottom = -width / 2, 0.0, width / 2, height
         if ink_box is not None:
             left, top = min(left, ink_box[0]), min(top, ink_box[1])
@@ -216,7 +211,8 @@ def render_pdf_tiles(pdf_bytes, pdf_page_index, annotation_bytes, output: Path):
                 "pdf_background_box_px": [background_x, background_y,
                                           background_x + math.ceil(width * RASTER_SCALE),
                                           background_y + math.ceil(height * RASTER_SCALE)],
-                "annotation_rendering": "visible_supported_v6", "coordinate_grid": "1404x1872"}
+                "annotation_rendering": "visible_supported_v6", "coordinate_grid": "1404x1872",
+                "scene_info": scene_metadata}
     except PdfError:
         raise
     except Exception as exc:

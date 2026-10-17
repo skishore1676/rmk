@@ -2,7 +2,7 @@
 
 The private `remarkable-companion` plugin extends `rmk` into an interactive
 connection for Codex: review changed handwriting, read specific pages, and
-post a useful document back to reMarkable. Version `0.2.0` targets the existing
+post a useful document back to reMarkable. Version `0.2.1` targets the existing
 Mac desktop-app source and `rmapi` upload connection.
 
 ## Design

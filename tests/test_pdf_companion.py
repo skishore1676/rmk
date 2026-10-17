@@ -56,7 +56,7 @@ def source_pdf(*, pages=3, marker=(0.2, 0.5, 0.9), rotation=0, crop=False):
 
 
 def annotation(*, point=(70, 70), page_width=400, tool=Pen.FINELINER_2,
-               text="", highlight=False, paper=None, hidden=False):
+               text="", highlight=False, paper=None, hidden=False, scene_extra=None):
     """A cross at a known PDF-point location, serialized as real v6 strokes."""
     blocks = list(simple_text_document(text, author_uuid=uuid.UUID(int=42)))
     if hidden:
@@ -65,6 +65,10 @@ def annotation(*, point=(70, 70), page_width=400, tool=Pen.FINELINER_2,
         blocks.append(SceneInfo(LwwValue(CrdtId(0, 1), CrdtId(0, 11)),
                                 LwwValue(CrdtId(0, 1), True), LwwValue(CrdtId(0, 1), True),
                                 extra_data=b"\x5c\x08\x00\x00\x00" + struct.pack("<II", *paper)))
+    if scene_extra is not None:
+        blocks.append(SceneInfo(LwwValue(CrdtId(0, 1), CrdtId(0, 11)),
+                                LwwValue(CrdtId(0, 1), True), LwwValue(CrdtId(0, 1), True),
+                                extra_data=scene_extra))
     x, y = point
     for i, pts in enumerate(([(x-10, y), (x+10, y)], [(x, y-10), (x, y+10)])):
         line = Line(PenColor.BLACK, tool,
@@ -181,6 +185,53 @@ def test_annotation_delta_historical_read_and_no_duplicate_delta(service):
     acknowledge(service, current)
     assert capture(service)["changes"]["edited"] == []
     assert call(service, "capture", notebook_id=NB, consumer="other")["changes"]["baseline"]
+
+
+def test_viewport_metadata_does_not_translate_or_scale_known_pdf_ink(tmp_path):
+    from test_scene_info import modern_metadata
+    old, new = tmp_path / "old", tmp_path / "new"
+    old.mkdir(); new.mkdir()
+    first = render_pdf_tiles(source_pdf(), 0, annotation(), old)
+    second = render_pdf_tiles(source_pdf(), 0, annotation(scene_extra=modern_metadata(include_flag=True)), new)
+    assert (first["width"], first["height"]) == (second["width"], second["height"])
+    assert len(first["tiles"]) == len(second["tiles"])
+    for a, b in zip(first["tiles"], second["tiles"]):
+        assert (old / a["file"]).read_bytes() == (new / b["file"]).read_bytes()
+    assert second["scene_info"][0]["fields"] == [5, 6, 7, 8, 9]
+    image = Image.open(new / second["tiles"][0]["file"]).convert("RGB")
+    assert max(image.getpixel((210, 210))) < 30
+    assert image.getpixel((175, 175))[2] > 180
+    image.close()
+
+
+def test_unqualified_scene_profile_preserves_all_checkpoints(service):
+    from test_scene_info import modern_metadata
+    initial = capture(service)
+    acknowledge(service, initial)
+    store = service._store(NB)
+    before_state = (store.directory / "state.json").read_bytes()
+    before_reader = service._reader_path(store, "codex").read_bytes()
+    (Path(service._config.root) / NB / f"{P1}.rm").write_bytes(annotation(scene_extra=modern_metadata(include_flag=True, flag=2)))
+    result = service.call_tool("remarkable_capture", {"notebook_id": NB})
+    assert result["isError"]
+    error = json.loads(result["content"][0]["text"])
+    assert error["error"] == "unsupported_pdf_annotations" and "field 9" in error["message"]
+    assert (store.directory / "state.json").read_bytes() == before_state
+    assert service._reader_path(store, "codex").read_bytes() == before_reader
+
+
+def test_previous_pdf_recipe_revision_remains_readable_after_upgrade(service, monkeypatch):
+    monkeypatch.setattr(pdf_capture, "PDF_RENDER_VERSION", "pdf-v6-tiles-v1")
+    old = capture(service)
+    acknowledge(service, old)
+    monkeypatch.setattr(pdf_capture, "PDF_RENDER_VERSION", "pdf-v6-tiles-v2")
+    page = call(service, "read_page", notebook_id=NB, revision=old["revision"], page_id=P1)
+    assert page["revision"] == old["revision"] and page["covers_entire_page"]
+    current = capture(service)
+    assert current["revision"] != old["revision"]
+    assert current["expected_previous_revision"] == old["revision"]
+    assert current["changes"]["annotations_edited"] == []
+    assert service._reader(service._store(NB), "codex")["revision"] == old["revision"]
 
 
 def test_new_annotation_file_on_previously_unmarked_page_is_detected(service):

@@ -299,7 +299,7 @@ class Companion:
         return visible, failures
 
     def status(self):
-        data = {"plugin": "remarkable-companion", "version": "0.2.0",
+        data = {"plugin": "remarkable-companion", "version": "0.2.1",
                 "sync_freshness": "unknown", "rmapi_installed": find_rmapi() is not None,
                 "rmapi_credentials_present": _rmapi_registered(), "cloud_authentication": "not_checked",
                 "interpretation": "host_model_reads_images", "notebooks": [],

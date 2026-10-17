@@ -157,7 +157,7 @@ class CompanionCaptureStore(CaptureStore):
     def _validate_sources(self, directory, manifest):
         if manifest.get("document_type") != "pdf":
             return super()._validate_sources(directory, manifest)
-        if manifest["render_version"] != PDF_RENDER_VERSION:
+        if manifest["render_version"] not in {"pdf-v6-tiles-v1", PDF_RENDER_VERSION}:
             raise CaptureError("Unsupported PDF rendering revision")
         content = json.loads((directory / "source" / f"{self.notebook_id}.content").read_bytes())
         count = manifest["original_pdf_page_count"]
