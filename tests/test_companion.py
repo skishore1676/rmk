@@ -192,10 +192,10 @@ def test_fresh_inventory_hides_ancestor_trash_and_reports_corruption(service):
     assert call(service, "browse")["inventory_complete"] is False
 
 
-def test_imported_pdf_is_not_presented_as_a_complete_handwritten_notebook(service):
+def test_pdf_without_original_background_is_not_presented_as_complete(service):
     (Path(service._config.root) / f"{NB}.content").write_text(json.dumps({"fileType": "pdf", "pages": [P1]}))
-    assert call(service, "browse")["documents"][0]["readable"] is False
-    assert failure(service, "capture", notebook_id=NB) == "notebook_unavailable"
+    assert call(service, "browse")["documents"][0]["requires_pdf_layout_validation"] is True
+    assert failure(service, "capture", notebook_id=NB) == "invalid_file"
 
 
 def test_corrupt_or_symlinked_artifacts_fail_without_exposing_outside_bytes(service, tmp_path):

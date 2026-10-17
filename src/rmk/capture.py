@@ -114,6 +114,30 @@ class CaptureStore:
         self.source_id = digest(_json_bytes({"kind": kind, "root": root}))
         self.directory = self.base / self.source_id / notebook_id
 
+    def _snapshot(self):
+        return read_snapshot(self.transport, self.root, self.notebook_id)
+
+    def _render_version(self, snapshot):
+        return CAPTURE_RENDER_VERSION
+
+    def _render_page(self, snapshot, page_id, data, output):
+        return {"id": page_id, "sha256": digest(data), **render_tiles(data, output)}
+
+    def _snapshot_fields(self, snapshot):
+        return {}
+
+    def _validate_sources(self, directory, manifest):
+        """Default capture remains native-notebook-only, including old revisions."""
+        pages = manifest["pages"]
+        source_paths = [f"{self.notebook_id}.metadata", f"{self.notebook_id}.content"]
+        source_paths += [f"{self.notebook_id}/{p['id']}.rm" for p in pages]
+        if set(manifest["source_hashes"]) != set(source_paths):
+            raise CaptureError("Incomplete revision source coverage")
+        for page in pages:
+            if page["sha256"] != manifest["source_hashes"][f"{self.notebook_id}/{page['id']}.rm"]:
+                raise CaptureError("Page checksum mismatch")
+        return source_paths
+
     @contextmanager
     def _lock(self):
         for path in (self.base, self.directory.parent, self.directory):
@@ -165,17 +189,14 @@ class CaptureStore:
         pages = manifest["pages"]
         if manifest["active_order"] != [checked_id(p["id"]) for p in pages]:
             raise CaptureError("Invalid revision page order")
-        source_paths = [f"{self.notebook_id}.metadata", f"{self.notebook_id}.content"]
-        source_paths += [f"{self.notebook_id}/{p['id']}.rm" for p in pages]
-        if set(manifest["source_hashes"]) != set(source_paths) or len(set(manifest["active_order"])) != len(pages):
+        source_paths = self._validate_sources(directory, manifest)
+        if len(set(manifest["active_order"])) != len(pages):
             raise CaptureError("Incomplete revision source coverage")
         required_artifacts = {f"source/{path}" for path in source_paths}
         for path, checksum in manifest["source_hashes"].items():
             if manifest["artifact_hashes"].get(f"source/{path}") != checksum:
                 raise CaptureError("Source artifact checksum mismatch")
         for page in pages:
-            if page["sha256"] != manifest["source_hashes"][f"{self.notebook_id}/{page['id']}.rm"]:
-                raise CaptureError("Page checksum mismatch")
             if page["height"] <= 0 or page["width"] <= 0 or not page["tiles"]:
                 raise CaptureError("Incomplete page render")
             end = 0
@@ -210,9 +231,10 @@ class CaptureStore:
     def capture(self) -> dict:
         with self._lock():
             state, prior = self._load()
-            snapshot = read_snapshot(self.transport, self.root, self.notebook_id)
+            snapshot = self._snapshot()
+            render_version = self._render_version(snapshot)
             revision = digest(_json_bytes({"source_hashes": snapshot.source_hashes,
-                                          "render_version": CAPTURE_RENDER_VERSION}))
+                                          "render_version": render_version}))
             observed_at = datetime.now(timezone.utc).isoformat()
             if state and state["revision"] == revision:
                 snapshot.verify(self.transport, self.root)
@@ -235,10 +257,10 @@ class CaptureStore:
                 for pid, data in snapshot.pages:
                     output = stage / "pages" / pid
                     _private_dir(output)
-                    rendered = render_tiles(data, output)
+                    rendered = self._render_page(snapshot, pid, data, output)
                     for tile in rendered["tiles"]:
                         tile["file"] = f"pages/{pid}/{tile['file']}"
-                    pages.append({"id": pid, "sha256": digest(data), **rendered})
+                    pages.append(rendered)
                 artifact_hashes = {str(p.relative_to(stage)): digest(p.read_bytes())
                                    for p in stage.rglob("*") if p.is_file()}
                 manifest = {"schema": SCHEMA, "notebook_id": self.notebook_id, "source_id": self.source_id,
@@ -247,8 +269,8 @@ class CaptureStore:
                             "observed_at": observed_at, "source_hashes": snapshot.source_hashes,
                             "active_order": [pid for pid, _ in snapshot.pages], "pages": pages,
                             "coverage": "All declared active pages; orphan/deleted files excluded",
-                            "sync_freshness": "unknown", "render_version": CAPTURE_RENDER_VERSION,
-                            "artifact_hashes": artifact_hashes}
+                            "sync_freshness": "unknown", "render_version": render_version,
+                            "artifact_hashes": artifact_hashes, **self._snapshot_fields(snapshot)}
                 _write(stage / "manifest.json", _json_bytes(manifest))
                 self._validate_revision(stage)
                 snapshot.verify(self.transport, self.root)

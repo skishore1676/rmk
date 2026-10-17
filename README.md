@@ -12,6 +12,9 @@ The private plugin connects Codex to the Mac's existing `rmk` configuration:
   including edits to older pages, using a separate reader checkpoint.
 - **Read handwriting:** return page images from an exact revision and continue
   through all tiles of a long page. Codex interprets the images directly.
+- **Read annotated PDFs:** combine supported v6 handwriting and highlights with
+  their mapped original PDF pages, including inserted pages and margin notes.
+  Report annotation, background and page-mapping changes separately.
 - **Send documents:** prepare a PDF brief or stage an existing PDF/EPUB, then
   post a new document with a durable request ID and an upload receipt.
 
@@ -30,11 +33,15 @@ does not require `agent-broker` or another model-provider login.
 Follow the [Companion setup and tool guide](docs/companion-plugin.md) to install
 locally, select notebooks, and verify a complete read-and-post cycle. Local
 stdio is the default; optional authenticated HTTP binds to loopback. Connecting
-web chat or Pex requires a separately verified authenticated tunnel to the Mac.
+web chat or Pex requires a separately verified connection to the Mac. Hosts that
+support stdio can use an existing SSH launcher; preserve its configuration when
+upgrading the server.
 
-This version reads supported handwritten notebooks from the desktop app's
-local source. PDF/EPUB reading, editing native notebook content, and inserting
-pages into an existing notebook are outside its scope. Cloud upload readback
+Version 0.2 reads supported handwritten notebooks and annotated PDFs from the
+desktop app's local source. See the [PDF upgrade guide](docs/pdf-annotation-upgrade.md)
+for existing installations and the tool guide for supported layouts. EPUB
+reading, editing native notebook content, and inserting pages into an existing
+notebook are outside its scope. Cloud upload readback
 and physical tablet sync are reported separately; tablet freshness is unknown.
 
 ## Existing command-line workflow

@@ -96,11 +96,13 @@ def validate_parent_path(parent: str) -> str:
 
 
 @contextmanager
-def open_document_file(path: str | Path):
+def open_document_file(path: str | Path, *, missing_ok: bool = False):
     """Open one regular file without following symlinks in any component.
 
     Walking via directory descriptors also closes the usual check/open race.
-    The plugin separately restricts which host roots may be selected.
+    The plugin separately restricts which host roots may be selected. With
+    missing_ok, a genuinely absent file yields None; links and access failures
+    remain errors. This is used for sparse PDF annotation files.
     """
     raw = os.fspath(path)
     if not isinstance(raw, str) or ".." in Path(raw).parts or any(unicodedata.category(c).startswith("C") for c in raw):
@@ -109,17 +111,24 @@ def open_document_file(path: str | Path):
     directory_fd = None
     file_fd = None
     try:
-        directory_fd = os.open(absolute.anchor, os.O_RDONLY | os.O_DIRECTORY)
-        for part in absolute.parts[1:-1]:
-            next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory_fd)
-            os.close(directory_fd)
-            directory_fd = next_fd
-        file_fd = os.open(absolute.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory_fd)
-        if not stat.S_ISREG(os.fstat(file_fd).st_mode):
-            raise CloudError("The selected document must be a regular file.", code="invalid_file")
-        with os.fdopen(file_fd, "rb") as stream:
-            file_fd = None
-            yield stream
+        try:
+            directory_fd = os.open(absolute.anchor, os.O_RDONLY | os.O_DIRECTORY)
+            for part in absolute.parts[1:-1]:
+                next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory_fd)
+                os.close(directory_fd)
+                directory_fd = next_fd
+            file_fd = os.open(absolute.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory_fd)
+        except FileNotFoundError:
+            if not missing_ok:
+                raise CloudError("The selected file is unavailable.", code="invalid_file") from None
+        if file_fd is None:
+            yield None
+        else:
+            if not stat.S_ISREG(os.fstat(file_fd).st_mode):
+                raise CloudError("The selected document must be a regular file.", code="invalid_file")
+            with os.fdopen(file_fd, "rb") as stream:
+                file_fd = None
+                yield stream
     except OSError:
         raise CloudError("The selected file is unavailable or uses a symbolic link.", code="invalid_file") from None
     finally:

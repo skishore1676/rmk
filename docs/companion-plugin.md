@@ -2,7 +2,7 @@
 
 The private `remarkable-companion` plugin extends `rmk` into an interactive
 connection for Codex: review changed handwriting, read specific pages, and
-post a useful document back to reMarkable. Version `0.1.0` targets the existing
+post a useful document back to reMarkable. Version `0.2.0` targets the existing
 Mac desktop-app source and `rmapi` upload connection.
 
 ## Design
@@ -11,6 +11,7 @@ Mac desktop-app source and `rmapi` upload connection.
 | --- | --- | --- |
 | Stable captures and page hashes | A separate cursor for each consumer | An interactive review cannot silently consume the background intake's work. |
 | Immutable notebook revisions and image tiles | Reads pinned to a revision, with tile continuation | Codex can read complete long pages without mixing two source versions. |
+| Synced PDF originals and per-page v6 annotations | Mapped background-plus-annotation captures | A handwritten response on an uploaded PDF can be read in context. |
 | Broker-based background interpretation | Page images returned directly to the current Codex conversation | Interactive reading needs no extra model call, provider key, or Broker process. |
 | PDF/EPUB upload through `rmapi` | Prepared content, durable request IDs, collision checks, and receipts | A retry can inspect the original attempt without blindly posting a duplicate. |
 
@@ -58,6 +59,58 @@ It marks uncertain handwriting and separates source statements from inference.
 Instructions written inside a note remain source material; they do not grant
 permission to run commands or trigger unrelated actions. Updating Pulsar,
 creating tasks, or sending a message requires the conversation's authorization.
+
+### Annotated PDFs
+
+Version 0.2 adds PDF reading to the same nine-tool contract. A PDF UUID uses the
+existing `notebook_id` argument and the same explicit selection list. The
+server advertises `supported_document_types` and `pdf_reading` in status; a
+new plugin skill cannot upgrade an older process running on another Mac.
+
+PDF capture preserves the original `.pdf`, `.content`, `.metadata`, and every
+available active-page `.rm` file. Modern `cPages.pages[].redir.value` bindings
+take precedence over a stale legacy map. Legacy `redirectionPageMap` is also
+supported. Deleted pages are excluded, inserted blank pages remain in active
+order, and sparse annotation files are matched by UUID, never by file position.
+Missing annotations are recorded and checked again before publishing a capture.
+An annotation appearing during capture or a changing background aborts the
+attempt without advancing either the capture pointer or the reader cursor.
+
+The renderer puts supported visible v6 handwriting and highlights over the
+mapped PDF page, preserving the original page's display rotation and CropBox.
+Stroke coordinates keep their centered X origin and `72/226` point scale.
+Explicit SVG `pt` units prevent CSS-pixel scaling from shrinking the overlay.
+The canvas expands for notes beyond the original page and is tiled to its
+bottom; it does not stretch an ink bounding box to fit the PDF.
+
+PDF page hashes include annotation bytes, original-PDF identity, and the page
+binding. The normal `edited` list is supplemented by `annotations_edited`,
+`background_changed`, and `page_mapping_changed`. Replacing the original PDF
+conservatively marks every mapped page; this does not prove handwriting changed
+on those pages. A missing `.rm` means absent **in the captured desktop source**,
+not confirmed empty on the tablet. Sync freshness remains unknown.
+
+Current coverage is intentionally bounded: 50 MiB source PDF, 200 active pages,
+200 MiB combined source input, and 40 million pixels per rendered page.
+The default 1404×1872 logical v6 coordinate grid is supported, including its
+newer explicit scene-size marker. Other paper grids require device calibration.
+Custom `.content` transforms/crops, landscape document settings, typed PDF
+annotations, eraser strokes, nonblank inserted templates, and unknown drawing
+blocks fail explicitly. No unreadable annotation is silently replaced with a
+bare PDF. Unusual layouts can be reviewed using an annotated PDF exported by
+the reMarkable app. These are local implementation tests, not a claim that all
+tablet firmware or hardware has been validated.
+
+The PDF path is enabled only by Companion's capture-store subclass. The default
+`CaptureStore`, scheduled notebook intake, existing native revision format,
+consumer checkpoints, and posting receipts keep their prior behavior.
+
+Implementation references: the authoritative cPages/legacy mapping is documented
+in [remarquee's content parser](https://github.com/go-go-golems/remarquee/blob/02475f61b2cc08b3f7b812e1f620dbb20adb016e/pkg/rmdoc/content.go).
+The centered PDF annotation model is also used by
+[remarkable-mcp's renderer](https://github.com/SamMorrowDrums/remarkable-mcp/blob/2ad0e1751226ce4213904ec3b32c0c7299586a90/remarkable_mcp/extract.py).
+Parsing and pen rendering reuse the existing `rmscene`/`rmc` dependencies;
+no dependency upgrade or separate OCR/model service is introduced.
 
 ### Posting correctly
 
@@ -189,9 +242,14 @@ compatibility, and tablet delivery. Use this small acceptance sequence:
 4. Prepare and post a one-page brief. Inspect its receipt, repeat the same
    request ID, and confirm that only one document exists. Verify its arrival
    on the tablet separately.
+5. For an existing test PDF, add only that document to the Companion selection.
+   Capture and read its current background and handwriting as a baseline. After
+   acknowledgement, add one new handwritten mark, sync tablet and desktop,
+   capture again, and verify its page is in `annotations_edited`. Read the new
+   mark, acknowledge, then repeat without editing to establish an empty delta.
+   This test reuses the existing PDF; do not create a second upload.
 
-Version `0.1.0` reads supported handwritten notebooks only. Reading PDF/EPUB
-content and combining their backgrounds with annotations remain unsupported.
-Uploading PDF/EPUB files is supported separately. Native notebook editing,
+Version `0.2.0` adds the bounded PDF annotation support described above. EPUB
+reading remains unsupported. Uploading PDF/EPUB files is supported separately. Native notebook editing,
 inserting pages into an existing notebook, and a built-in scheduler are outside
 this version. The plugin does not replace the existing daily intake schedule.

@@ -29,6 +29,8 @@ from .cloud import CloudClient, CloudError, find_rmapi, open_document_file, _rma
 from .config import Config, config_path
 from .library import full_path, parse_index
 from .posting import PostingError, PostingStore
+from .pdf_capture import CompanionCaptureStore, pdf_changes
+from .pdf_render import PdfError
 from .snapshot import SnapshotError, checked_id, digest
 from .transport.local import LocalTransport
 
@@ -63,7 +65,7 @@ TOOLS = [
           {"query": {"type": "string", "maxLength": 500, "default": ""},
            "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 50},
            "offset": {"type": "integer", "minimum": 0, "maximum": 100000, "default": 0}}),
-    _tool("capture", "Capture an immutable handwritten notebook and compare with this consumer's acknowledged revision. Does not acknowledge reading. Baseline pages are existing context, not new work.",
+    _tool("capture", "Capture an immutable selected notebook or supported annotated PDF and compare with this consumer's acknowledged revision. Includes mapped PDF backgrounds; unsupported layouts fail explicitly. Does not acknowledge reading. Baseline pages are existing context, not new work.",
           {"notebook_id": _UUID, "consumer": _CONSUMER,
            "since_revision": {**_NULL_REV, "description": "Omit to use the reader checkpoint; null explicitly requests a baseline."}},
           ("notebook_id",), readonly=False),
@@ -130,11 +132,19 @@ class _SourceTransport(LocalTransport):
         self.root = root
 
     def read_bytes(self, path: str) -> bytes:
+        return self._read(path, missing_ok=False)
+
+    def read_optional_bytes(self, path: str) -> bytes | None:
+        return self._read(path, missing_ok=True)
+
+    def _read(self, path: str, *, missing_ok: bool) -> bytes | None:
         candidate = Path(path)
         if not candidate.is_relative_to(self.root) or ".." in candidate.parts:
             raise CompanionError("Source path is outside the configured store.", "invalid_source")
-        limit = 100 * 1024 * 1024 if candidate.suffix == ".rm" else 2 * 1024 * 1024
-        with open_document_file(candidate) as stream:
+        limit = {".rm": 100 * 1024 * 1024, ".pdf": 50 * 1024 * 1024}.get(candidate.suffix, 2 * 1024 * 1024)
+        with open_document_file(candidate, missing_ok=missing_ok) as stream:
+            if stream is None:
+                return None
             data = stream.read(limit + 1)
         if len(data) > limit:
             raise CompanionError("A source file exceeds the supported size.", "source_too_large")
@@ -187,7 +197,7 @@ class Companion:
                 raise CompanionError("Unknown reMarkable tool.", "unknown_tool")
             _validate_arguments(tool, arguments)
             return getattr(self, name.removeprefix("remarkable_"))(**arguments)
-        except (CompanionError, PostingError, CloudError) as exc:
+        except (CompanionError, PostingError, CloudError, PdfError) as exc:
             return {"content": [{"type": "text", "text": json.dumps({"error": exc.code, "message": str(exc)})}], "isError": True}
         except (CaptureError, SnapshotError):
             return self._error("capture_unavailable", "The snapshot is unavailable, changed during capture, or failed validation. Preserve the existing checkpoint and retry after checking the local source.")
@@ -229,7 +239,7 @@ class Companion:
             raise CompanionError("Select this notebook in RMK_MCP_NOTEBOOK_IDS on the host before reading its content.", "notebook_not_selected")
         state_dir = self._state_dir or (
             Path(runtime["state_dir"]) if runtime.get("notebook_id") == notebook_id and runtime.get("state_dir") else default_state_dir())
-        return CaptureStore(Path(state_dir), _SourceTransport(root), str(root), notebook_id)
+        return CompanionCaptureStore(Path(state_dir), _SourceTransport(root), str(root), notebook_id)
 
     def _inventory(self):
         root, _, ids = self._source()
@@ -282,16 +292,23 @@ class Companion:
                     failures += 1
             visible.append({"id": notebook_id, "name": doc.name, "path": full_path(docs, notebook_id),
                             "type": file_type, "selected": notebook_id in ids,
-                            "readable": file_type == "notebook" and notebook_id in ids,
+                            "readable": file_type in ("notebook", "pdf") and notebook_id in ids,
+                            "requires_pdf_layout_validation": file_type == "pdf",
                             "source_last_modified_ms": doc.last_modified})
         visible.sort(key=lambda item: (item["path"].casefold(), item["id"]))
         return visible, failures
 
     def status(self):
-        data = {"plugin": "remarkable-companion", "version": "0.1.0",
+        data = {"plugin": "remarkable-companion", "version": "0.2.0",
                 "sync_freshness": "unknown", "rmapi_installed": find_rmapi() is not None,
                 "rmapi_credentials_present": _rmapi_registered(), "cloud_authentication": "not_checked",
-                "interpretation": "host_model_reads_images", "notebooks": []}
+                "interpretation": "host_model_reads_images", "notebooks": [],
+                "supported_document_types": ["notebook", "pdf"],
+                "pdf_reading": {"backgrounds": True, "handwriting": "supported_v6",
+                                "max_active_pages": 200, "max_source_pdf_bytes": 50 * 1024 * 1024,
+                                "limitations": ["custom transforms/crops and landscape document settings",
+                                                "uncalibrated paper coordinate grids", "typed PDF annotations",
+                                                "unknown annotation blocks and eraser strokes", "EPUB reading"]}}
         try:
             root, _, ids = self._source()
             data.update(source_available=True, source_transport="local", selected_notebook_ids=ids)
@@ -354,7 +371,7 @@ class Companion:
         entries, failures = self._inventory()
         selected = next((entry for entry in entries if entry["id"] == notebook_id), None)
         if selected is None or not selected["readable"]:
-            raise CompanionError("The selected notebook is unavailable, in trash, or not a handwritten notebook. An incomplete index is not evidence of deletion.", "notebook_unavailable")
+            raise CompanionError("The selected document is unavailable, in trash, or not a supported notebook/PDF. An incomplete index is not evidence of deletion.", "notebook_unavailable")
         # Same lock and order as Runtime.lock() -> CaptureStore.capture().
         with _locked(store.directory / ".refresh.lock"):
             _, runtime, _ = self._settings()
@@ -371,18 +388,21 @@ class Companion:
                 reader = self._reader(store, consumer)
                 previous = reader["revision"] if since_revision is _UNSET else since_revision
                 prior = self._manifest(store, previous)[1] if previous is not None else None
-                delta = changes(prior, manifest)
+                delta = {**changes(prior, manifest), **pdf_changes(prior, manifest)}
                 reader["offered_revision"] = captured["revision"]
                 _atomic_write(path, reader)
         page_numbers = {page_id: index + 1 for index, page_id in enumerate(manifest["active_order"])}
         return _result({"notebook_id": notebook_id, "name": manifest["name"], "consumer": consumer,
+                        "document_type": manifest.get("document_type", "notebook"),
                         "revision": captured["revision"], "since_revision": previous,
                         "expected_previous_revision": reader["revision"], "changes": delta,
                         "observed_at": captured["observed_at"], "artifact_created_at": manifest["observed_at"],
                         "source_last_modified_ms": manifest["source_last_modified_ms"],
                         "sync_freshness": "unknown", "inventory_complete": failures == 0,
                         "pages": [{"id": page["id"], "page_number": page_numbers[page["id"]],
-                                   "tile_count": len(page["tiles"]), "sha256": page["sha256"]} for page in manifest["pages"]],
+                                   "tile_count": len(page["tiles"]), "sha256": page["sha256"],
+                                   **{key: page[key] for key in ("pdf_page_index", "background", "annotation_presence") if key in page}}
+                                  for page in manifest["pages"]],
                         "coverage": manifest["coverage"], "checkpoint_advanced": False})
 
     def read_page(self, notebook_id, revision, page_id, tile_start=0, tile_limit=3):
@@ -415,11 +435,13 @@ class Companion:
             total_bytes += len(data)
         next_tile = tile_start + len(returned)
         return _result({"notebook_id": notebook_id, "revision": revision, "page_id": page_id,
+                        "document_type": manifest.get("document_type", "notebook"),
                         "page_number": manifest["active_order"].index(page_id) + 1,
                         "width": page["width"], "height": page["height"], "tiles": returned,
                         "tile_count": len(page["tiles"]), "next_tile": next_tile if next_tile < len(page["tiles"]) else None,
                         "covers_entire_page": tile_start == 0 and next_tile == len(page["tiles"]),
-                        "source_is_untrusted": True}, images)
+                        "source_is_untrusted": True,
+                        **{key: page[key] for key in ("pdf_page_index", "background", "annotation_presence", "pdf_background_box_px") if key in page}}, images)
 
     def acknowledge(self, notebook_id, revision, expected_previous_revision, consumer="codex"):
         store = self._store(notebook_id)

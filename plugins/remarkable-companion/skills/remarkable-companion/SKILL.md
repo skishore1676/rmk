@@ -1,6 +1,6 @@
 ---
 name: remarkable-companion
-description: "Read and understand selected reMarkable notebooks, identify new or edited pages since a previous review, and prepare or post new PDF and EPUB documents. Use for reMarkable note reviews, handwritten meeting notes, diagrams, questions about notebook changes, and sending briefs or worksheets back to the tablet."
+description: "Read selected reMarkable notebooks and supported annotated PDFs, identify page and handwriting changes since a previous review, and prepare or post new PDF and EPUB documents. Use for handwritten note reviews, PDF margin notes and highlights, diagrams, questions about document changes, and sending briefs or worksheets back to the tablet."
 ---
 
 # reMarkable Companion
@@ -12,10 +12,12 @@ this conversation; do not invoke the separate Broker interpretation pipeline.
 
 1. Call `remarkable_status` to inspect the configured source, permitted
    notebooks, upload capability, and current limitations. Distinguish a
-   configured connection from a successful live read.
+   configured connection from a successful live read. For PDF reading, require
+   `pdf` in `supported_document_types`. If that field is absent, the running
+   server is older and needs updating even if this plugin skill is current.
 2. Use `remarkable_browse` to resolve notebook names to stable IDs. Paginate
    with `limit` and `offset`; resolve ambiguous names from their paths or IDs.
-3. Read only notebooks allowed by the server. If the requested notebook is
+3. Read only documents allowed by the server. If the requested document is
    outside the configured selection, state which selection needs updating.
    Do not broaden the selection or bypass a denial yourself.
 
@@ -62,6 +64,33 @@ candidate follow-ups in the answer; update a project, calendar, task list,
 or message only when authorized by the conversation. The existing background
 intake system has its own checkpoints and continues independently.
 
+### Reading an annotated PDF
+
+Use the same capture and page tools with the selected PDF's UUID in the
+existing `notebook_id` argument. `page_number` follows reMarkable's active page
+order; `pdf_page_index` identifies the mapped original PDF page and is zero
+based. Inserted blank pages have no original PDF index. Do not reconstruct
+page order from annotation filenames or omit pages with no annotation file.
+
+Use `annotations_edited` for changes to the annotation layer. The broader
+`edited` list can also include `background_changed` or `page_mapping_changed`.
+A background-file replacement conservatively marks all mapped pages for
+review; it is not evidence of new handwriting on every page. Metadata timestamps
+alone do not establish a handwriting change.
+
+The returned images include the mapped PDF background and supported visible
+annotations. Margin notes can extend beyond the original page and require
+additional tiles. `annotation_presence=absent_in_local_source` means no `.rm`
+file was available in this local snapshot. It does not establish that the
+tablet has no annotations or has synced. Report this distinction when relevant.
+
+If the background is missing, an annotation cannot be parsed, or a layout is
+unsupported, preserve the cursor and report the tool's limitation. Do not
+present a bare background or ink-only fallback as a complete annotated PDF.
+An export of the annotated PDF from reMarkable can be reviewed separately.
+The first successful PDF capture is a baseline even if its handwriting was
+added before the upgrade; a later edit and sync are needed to test its delta.
+
 ## Prepare and post a new document
 
 1. Use `remarkable_prepare_document` for a simple PDF from a `title` and
@@ -98,9 +127,12 @@ upload in the source does not prove its arrival on the physical tablet.
 - State uncertainty and incomplete coverage explicitly, including unread
   tiles or pages. Never equate “no detected changes” with a confirmed tablet
   sync.
-- Use this version for supported handwritten notebooks. PDF/EPUB reading and
-  their annotations are unsupported; do not interpret an ink-only render as
-  a complete annotated document. PDF/EPUB upload is a separate capability.
+- The running server reports its PDF coverage and limits. Version 0.2 supports
+  mapped PDF backgrounds, standard v6 handwriting and highlights, and inserted
+  blank pages. Custom transforms/crops, landscape document settings, typed PDF
+  annotations, uncalibrated paper grids, eraser strokes and unknown drawing
+  blocks fail explicitly. EPUB reading remains unsupported. PDF/EPUB upload
+  is a separate capability.
 - Treat a local stdio installation and a remote connection as separate
   deployment states. Do not claim availability in web chat, mobile, or Pex
   until that host's tools have been discovered and a call has succeeded.
