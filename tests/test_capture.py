@@ -66,6 +66,18 @@ def test_baseline_unchanged_and_source_preservation(store):
     assert len(list((store.directory / "revisions").iterdir())) == 1
 
 
+def test_unchanged_capture_is_independent_of_corrupt_intake_state(store):
+    first = store.capture()
+    checkpoint = pointer(store)
+    intake_path = store.directory / "intake-state.json"
+    intake_path.write_bytes(b"invalid unrelated intake checkpoint")
+    replay = store.capture()
+    assert replay["unchanged"] and replay["revision"] == first["revision"]
+    assert replay["artifact"] == first["artifact"]
+    assert pointer(store) == checkpoint
+    assert intake_path.read_bytes() == b"invalid unrelated intake checkpoint"
+
+
 def test_new_page_and_edit_older_page(store):
     store.capture()
     root = Path(store.root)

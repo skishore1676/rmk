@@ -1,0 +1,19 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "remarkable-companion": {
+      "type": "stdio",
+      "command": "uv",
+      "args": [
+        "run",
+        "--directory",
+        "${PLUGIN_ROOT}/server",
+        "--",
+        "python",
+        "-m",
+        "rmk.mcp_server"
+      ],
+      "cwd": "${PLUGIN_ROOT}/server"
+    }
+  }
+}

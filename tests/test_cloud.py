@@ -195,13 +195,112 @@ def test_upload_requires_rmapi_registered(tmp_path, monkeypatch):
     assert runner.calls == []
 
 
-def test_upload_reports_rmapi_failure(tmp_path, monkeypatch):
-    runner = FakeRunner([(1, "", "boom\n")])
+def test_plugin_can_upload_with_paired_rmapi_only_and_no_legacy_token_read(tmp_path, monkeypatch):
+    runner = FakeRunner([(0, "uploading...OK\n", "")])
+    # A directory cannot be read as the legacy token file. The opt-in must
+    # avoid touching it, as rmapi is the only credential owner for this path.
+    client = CloudClient(path=tmp_path, request=FakeHTTP([]), runner=runner, require_legacy_auth=False)
+    monkeypatch.setattr(cloud_module, "find_rmapi", lambda: Path("/bin/rmapi"))
+    monkeypatch.setattr(cloud_module, "_rmapi_registered", lambda: True)
+    pdf = tmp_path / "day.pdf"
+    pdf.write_bytes(fake_pdf())
+    assert not client.is_authed
+    assert client.upload_file(pdf)["name"] == "day"
+    assert runner.calls == [["/bin/rmapi", "put", str(pdf)]]
+
+
+def test_plugin_rmapi_only_mode_still_requires_rmapi_pairing(tmp_path, monkeypatch):
+    runner = FakeRunner([])
+    client = CloudClient(path=tmp_path, request=FakeHTTP([]), runner=runner, require_legacy_auth=False)
+    monkeypatch.setattr(cloud_module, "_rmapi_registered", lambda: False)
+    pdf = tmp_path / "day.pdf"
+    pdf.write_bytes(fake_pdf())
+    with pytest.raises(CloudError, match="rmapi is not registered"):
+        client.upload_file(pdf)
+    assert runner.calls == []
+
+
+def test_upload_reports_rmapi_failure_without_provider_output(tmp_path, monkeypatch):
+    runner = FakeRunner([(1, "", "boom Authorization: Bearer SECRET\n")])
     client = _authed_client(tmp_path, runner, monkeypatch)
     pdf = tmp_path / "day.pdf"
     pdf.write_bytes(fake_pdf())
-    with pytest.raises(CloudError, match="rmapi put .* failed: boom"):
+    with pytest.raises(CloudError, match="rmapi command failed") as failure:
         client.upload_file(pdf)
+    assert "SECRET" not in str(failure.value)
+
+
+@pytest.mark.parametrize("name", ["../escape", "/escape", "a/b", "a\\b", "--force", "a\nsecret", ""])
+def test_upload_rejects_unsafe_name_before_rmapi(tmp_path, monkeypatch, name):
+    runner = FakeRunner([])
+    client = _authed_client(tmp_path, runner, monkeypatch)
+    pdf = tmp_path / "day.pdf"
+    pdf.write_bytes(fake_pdf())
+    with pytest.raises(CloudError):
+        client.upload_file(pdf, name=name)
+    assert runner.calls == []
+
+
+@pytest.mark.parametrize("parent", ["--force", "relative", "/A/../B", "/A*", "/A\nB"])
+def test_upload_rejects_unsafe_parent_before_rmapi(tmp_path, monkeypatch, parent):
+    runner = FakeRunner([])
+    client = _authed_client(tmp_path, runner, monkeypatch)
+    pdf = tmp_path / "day.pdf"
+    pdf.write_bytes(fake_pdf())
+    with pytest.raises(CloudError):
+        client.upload_file(pdf, parent=parent)
+    assert runner.calls == []
+
+
+def test_upload_checks_pdf_magic_and_refuses_symlinks(tmp_path, monkeypatch):
+    runner = FakeRunner([])
+    client = _authed_client(tmp_path, runner, monkeypatch)
+    pdf = tmp_path / "day.pdf"
+    pdf.write_text("not a PDF")
+    with pytest.raises(CloudError, match="PDF data"):
+        client.upload_file(pdf)
+    pdf.write_bytes(fake_pdf())
+    linked = tmp_path / "linked.pdf"
+    linked.symlink_to(pdf)
+    with pytest.raises(CloudError, match="symbolic link"):
+        client.upload_file(linked)
+    assert runner.calls == []
+
+
+def test_stat_document_returns_only_validated_exact_metadata(tmp_path, monkeypatch):
+    document_id = "12345678-1234-1234-1234-123456789abc"
+    raw = {"ID": document_id, "Name": "Day brief", "Type": "DocumentType", "Parent": "", "ExtraToken": "SECRET"}
+    runner = FakeRunner([(0, json.dumps(raw), "")])
+    client = _authed_client(tmp_path, runner, monkeypatch)
+    result = client.stat_document("Day brief", "/Personal")
+    assert result == {"id": document_id, "name": "Day brief", "parent_id": "", "type": "DocumentType", "cloud_path": "/Personal/Day brief", "verification": "exact_path_metadata"}
+    assert runner.calls == [["/bin/rmapi", "-ni", "stat", "/Personal/Day brief"]]
+    assert "SECRET" not in json.dumps(result)
+
+
+def test_stat_document_distinguishes_missing_from_unavailable(tmp_path, monkeypatch):
+    runner = FakeRunner([(1, "", "Error: file doesn't exist\n"), (1, "", "Authorization: Bearer SECRET")])
+    client = _authed_client(tmp_path, runner, monkeypatch)
+    assert client.stat_document("Missing") is None
+    with pytest.raises(CloudError) as unavailable:
+        client.stat_document("Missing")
+    assert unavailable.value.code == "stat_unavailable"
+    assert "SECRET" not in str(unavailable.value)
+
+
+@pytest.mark.parametrize("metadata", [
+    {"ID": "12345678-1234-1234-1234-123456789abc", "Name": "Wrong", "Type": "DocumentType"},
+    {"ID": "SECRET", "Name": "Day", "Type": "DocumentType"},
+    {"ID": "12345678-1234-1234-1234-123456789abc", "Name": "Day", "Type": "UnknownType"},
+    {"name": "Day"},
+])
+def test_stat_document_rejects_mismatched_or_incomplete_metadata(tmp_path, monkeypatch, metadata):
+    runner = FakeRunner([(0, json.dumps(metadata), "")])
+    client = _authed_client(tmp_path, runner, monkeypatch)
+    with pytest.raises(CloudError) as failure:
+        client.stat_document("Day")
+    assert failure.value.code == "invalid_metadata"
+    assert "SECRET" not in str(failure.value)
 
 
 def test_list_documents_parses_rmapi_ls(tmp_path, monkeypatch):

@@ -11,9 +11,6 @@ We use ``AgentTask.raw_prompt`` — the broker's "hire for my prompt" passthroug
 
 from __future__ import annotations
 
-from agent_broker import AgentBroker, AgentContext, AgentSpec, AgentTask
-from agent_broker.policy import AgentPolicy, ProviderBinding, load_policy
-
 # Cap how many page-images we hand to the model in one turn. A single brainstorm
 # is rarely longer; we warn rather than silently truncate (see cli.py).
 MAX_PAGES = 20
@@ -60,6 +57,14 @@ def ask(
     """
     if not image_paths:
         raise LLMError("No page images to send.")
+
+    # Capture, cloud operations and the interactive MCP plugin need no broker.
+    # Load it only when this existing CLI path actually hires a model.
+    try:
+        from agent_broker import AgentBroker, AgentContext, AgentSpec, AgentTask
+        from agent_broker.policy import AgentPolicy, ProviderBinding, load_policy
+    except ImportError:
+        raise LLMError("Model commands require the existing agent-broker installation.") from None
 
     spec = AgentSpec(lane_id=lane, actor=actor, role=role)
     task = AgentTask(
