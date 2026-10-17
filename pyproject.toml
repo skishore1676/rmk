@@ -23,6 +23,7 @@ dependencies = [
 
 [project.scripts]
 rmk = "rmk.cli:app"
+rmk-mcp = "rmk.mcp_server:main"
 
 [build-system]
 requires = ["hatchling"]

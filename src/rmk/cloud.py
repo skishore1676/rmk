@@ -25,15 +25,20 @@ here touches the network unless a command runs.
 
 from __future__ import annotations
 
+import io
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
 import tempfile
+import unicodedata
 import urllib.error
 import urllib.request
 import uuid
+import zipfile
+from contextlib import contextmanager
 from pathlib import Path
 
 import platformdirs
@@ -52,6 +57,122 @@ USER_AGENT = "rmk/0.1.0"
 
 class CloudError(Exception):
     """Anything the reMarkable Cloud side went wrong (auth, upload, API)."""
+
+    def __init__(self, message: str, *, code: str = "cloud_error"):
+        super().__init__(message)
+        self.code = code
+
+
+MAX_DOCUMENT_BYTES = 50 * 1024 * 1024
+
+
+def validate_document_name(name: str) -> str:
+    """Accept one unambiguous document/folder name, never rmapi syntax."""
+    if (
+        not isinstance(name, str)
+        or not name
+        or name != name.strip()
+        or any(unicodedata.category(c).startswith("C") or c in "\u2028\u2029" for c in name)
+        or len(name.encode("utf-8")) > 180
+        or name.startswith(("-", ".", "~"))
+        or any(c in name for c in "/\\*?[]{}")
+    ):
+        raise CloudError("Use a plain document name without paths, control characters, or command syntax.", code="invalid_name")
+    return name
+
+
+def validate_parent_path(parent: str) -> str:
+    """Normalize the root; all other rmapi destinations must be absolute."""
+    if parent in ("", "/"):
+        return ""
+    if not isinstance(parent, str) or not parent.startswith("/") or any(unicodedata.category(c).startswith("C") for c in parent) or len(parent.encode("utf-8")) > 1024:
+        raise CloudError("The destination must be an absolute reMarkable folder path.", code="invalid_parent")
+    try:
+        for part in parent[1:].split("/"):
+            validate_document_name(part)
+    except CloudError:
+        raise CloudError("The destination contains an invalid folder name or traversal component.", code="invalid_parent") from None
+    return parent
+
+
+@contextmanager
+def open_document_file(path: str | Path, *, missing_ok: bool = False):
+    """Open one regular file without following symlinks in any component.
+
+    Walking via directory descriptors also closes the usual check/open race.
+    The plugin separately restricts which host roots may be selected. With
+    missing_ok, a genuinely absent file yields None; links and access failures
+    remain errors. This is used for sparse PDF annotation files.
+    """
+    raw = os.fspath(path)
+    if not isinstance(raw, str) or ".." in Path(raw).parts or any(unicodedata.category(c).startswith("C") for c in raw):
+        raise CloudError("The selected file path is invalid.", code="invalid_file")
+    absolute = Path(os.path.abspath(raw))
+    directory_fd = None
+    file_fd = None
+    try:
+        try:
+            directory_fd = os.open(absolute.anchor, os.O_RDONLY | os.O_DIRECTORY)
+            for part in absolute.parts[1:-1]:
+                next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory_fd)
+                os.close(directory_fd)
+                directory_fd = next_fd
+            file_fd = os.open(absolute.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory_fd)
+        except FileNotFoundError:
+            if not missing_ok:
+                raise CloudError("The selected file is unavailable.", code="invalid_file") from None
+        if file_fd is None:
+            yield None
+        else:
+            if not stat.S_ISREG(os.fstat(file_fd).st_mode):
+                raise CloudError("The selected document must be a regular file.", code="invalid_file")
+            with os.fdopen(file_fd, "rb") as stream:
+                file_fd = None
+                yield stream
+    except OSError:
+        raise CloudError("The selected file is unavailable or uses a symbolic link.", code="invalid_file") from None
+    finally:
+        if file_fd is not None:
+            os.close(file_fd)
+        if directory_fd is not None:
+            os.close(directory_fd)
+
+
+def read_document_file(path: str | Path, *, max_bytes: int = MAX_DOCUMENT_BYTES) -> tuple[bytes, str]:
+    """Bound the read and check PDF/EPUB magic before any external action."""
+    p = Path(path)
+    suffix = p.suffix.lower()
+    if suffix not in (".pdf", ".epub"):
+        raise CloudError("Only .pdf and .epub documents can be pushed.", code="invalid_file_type")
+    if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or max_bytes < 1 or max_bytes > MAX_DOCUMENT_BYTES:
+        raise CloudError("The document size limit is invalid.", code="invalid_limit")
+    with open_document_file(p) as stream:
+        before = os.fstat(stream.fileno())
+        if before.st_size < 1 or before.st_size > max_bytes:
+            raise CloudError("The selected document is empty or exceeds the configured size limit.", code="invalid_file_size")
+        data = stream.read(max_bytes + 1)
+        after = os.fstat(stream.fileno())
+    if len(data) > max_bytes or len(data) != before.st_size or (before.st_mtime_ns, before.st_ctime_ns) != (after.st_mtime_ns, after.st_ctime_ns):
+        raise CloudError("The selected document changed while it was being read, or exceeds the size limit.", code="file_changed")
+    if suffix == ".pdf":
+        if not re.match(rb"%PDF-\d\.\d", data) or b"%%EOF" not in data[-2048:]:
+            raise CloudError("The selected file does not contain recognizable PDF data.", code="invalid_file_magic")
+        return data, "application/pdf"
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            entries = archive.infolist()
+            if len(entries) > 10000 or sum(e.file_size for e in entries) > 4 * MAX_DOCUMENT_BYTES:
+                raise ValueError("archive too large")
+            for entry in entries:
+                parts = entry.filename.replace("\\", "/").split("/")
+                if entry.filename.startswith(("/", "\\")) or ".." in parts or stat.S_ISLNK(entry.external_attr >> 16) or entry.flag_bits & 1:
+                    raise ValueError("unsafe archive member")
+            mime = archive.getinfo("mimetype")
+            if mime.file_size != len(b"application/epub+zip") or archive.read(mime) != b"application/epub+zip" or "META-INF/container.xml" not in archive.namelist():
+                raise ValueError("not an EPUB")
+    except (zipfile.BadZipFile, KeyError, ValueError, RuntimeError, NotImplementedError, OSError):
+        raise CloudError("The selected file does not contain a supported EPUB archive.", code="invalid_file_magic") from None
+    return data, "application/epub+zip"
 
 
 def token_path() -> Path:
@@ -88,7 +209,11 @@ def _rmapi_registered() -> bool:
 
 def _default_runner(argv: list[str]):
     """Run rmapi and capture output (injectable for tests)."""
-    return subprocess.run(argv, capture_output=True, text=True, timeout=180)
+    # Never let a plugin request wait for a one-time registration code.
+    # Trace logs can contain credentials; they are unnecessary for this call.
+    env = dict(os.environ)
+    env.pop("RMAPI_TRACE", None)
+    return subprocess.run(argv, capture_output=True, text=True, timeout=180, stdin=subprocess.DEVNULL, env=env)
 
 
 def _default_request(method: str, url: str, body: bytes | None, headers: dict) -> tuple[int, bytes]:
@@ -110,13 +235,18 @@ def _default_request(method: str, url: str, body: bytes | None, headers: dict) -
 class CloudClient:
     """A reMarkable Cloud session. ``request``/``runner`` injectable for tests."""
 
-    def __init__(self, path: Path | None = None, request=None, runner=None):
+    def __init__(self, path: Path | None = None, request=None, runner=None, *, require_legacy_auth: bool = True):
         self._path = path or token_path()
         self._request = request or _default_request
         self._runner = runner or _default_runner
+        # The original CLI required rmk's separately registered device token.
+        # rmapi owns the real upload credentials. Plugins can use their
+        # already-paired rmapi session without reading or renewing rmk tokens.
+        self.require_legacy_auth = require_legacy_auth
         self.device_token: str = ""
         self.user_token: str = ""
-        self._load()
+        if require_legacy_auth:
+            self._load()
 
     # -- tokens -------------------------------------------------------------
     def _load(self) -> None:
@@ -195,11 +325,59 @@ class CloudClient:
         return rmapi
 
     def _run_rmapi(self, *args: str):
-        """Run rmapi, raising CloudError (with its output) on failure."""
-        result = self._runner([str(self._rmapi()), *args])
+        """Run rmapi without exposing potentially credential-bearing output."""
+        try:
+            result = self._runner([str(self._rmapi()), *args])
+        except (OSError, subprocess.TimeoutExpired):
+            raise CloudError("The rmapi command failed or timed out; its outcome may be unknown.", code="rmapi_unavailable") from None
         if result.returncode != 0:
-            raise CloudError(f"rmapi {' '.join(args)} failed: {(result.stderr or result.stdout or '').strip()}")
+            raise CloudError("The rmapi command failed. Check the connection locally before retrying.", code="rmapi_failed")
         return result
+
+    def stat_document(self, name: str, parent: str = "") -> dict | None:
+        """Read metadata at one exact cloud path; never infer tablet sync.
+
+        ``rmapi stat`` uses NodeByPath (not ls glob matching) and emits the
+        Document JSON. An absent entry is distinct from an unavailable cloud.
+        No raw stdout/stderr is returned to plugin callers.
+        """
+        name = validate_document_name(name)
+        parent = validate_parent_path(parent)
+        target = f"{parent}/{name}"
+        if not _rmapi_registered():
+            raise CloudError("rmapi is not registered yet.", code="not_registered")
+        try:
+            result = self._runner([str(self._rmapi()), "-ni", "stat", target])
+        except (OSError, subprocess.TimeoutExpired):
+            raise CloudError("Cloud metadata could not be checked.", code="stat_unavailable") from None
+        if result.returncode != 0:
+            # This is rmapi stat's explicit missing-entry diagnostic. Other
+            # failures must not be mistaken for a free destination name.
+            diagnostic = (result.stderr or "") + "\n" + (result.stdout or "")
+            if "file doesn't exist" in diagnostic.lower():
+                return None
+            raise CloudError("Cloud metadata could not be checked.", code="stat_unavailable")
+        try:
+            output = result.stdout or ""
+            if len(output) > 1024 * 1024:
+                raise ValueError("oversized metadata")
+            metadata = json.loads(output)
+            document_id = str(uuid.UUID(metadata["ID"]))
+            parent_id = metadata.get("Parent", "")
+            if parent_id:
+                parent_id = str(uuid.UUID(parent_id))
+            if metadata["Name"] != name or metadata["Type"] not in ("DocumentType", "CollectionType"):
+                raise ValueError("mismatched metadata")
+        except (ValueError, TypeError, KeyError, AttributeError):
+            raise CloudError("Cloud metadata did not identify the exact requested entry.", code="invalid_metadata") from None
+        return {
+            "id": document_id,
+            "name": name,
+            "parent_id": parent_id,
+            "type": metadata["Type"],
+            "cloud_path": target,
+            "verification": "exact_path_metadata",
+        }
 
     def list_documents(self) -> list[dict]:
         """Top-level documents/folders in the cloud (names only)."""
@@ -221,22 +399,22 @@ class CloudClient:
         is an rmapi folder path (default: library root). Returns the
         document's name and local path.
         """
-        p = Path(path)
-        if not p.is_file():
-            raise CloudError(f"No such file: {p}")
-        if p.suffix.lower() not in (".pdf", ".epub"):
-            raise CloudError(f"Only .pdf and .epub can be pushed (got {p.suffix}).")
-        if not self.is_authed:
+        p = Path(os.path.abspath(path))
+        display = validate_document_name(name if name is not None else p.stem)
+        parent = validate_parent_path(parent)
+        data, _ = read_document_file(path)
+        if self.require_legacy_auth and not self.is_authed:
             raise CloudError("Not connected to the reMarkable Cloud. Run `rmk cloud-register --code CODE` first.")
         if not _rmapi_registered():
             raise CloudError("rmapi is not registered yet — run `rmapi ls` and enter a fresh one-time code when prompted.")
-        display = name or p.stem
-        if display == p.stem:
+        if display == p.stem and p.suffix == p.suffix.lower():
             self._upload_via_rmapi(p, parent)
         else:
             with tempfile.TemporaryDirectory(prefix="rmk-push-") as tmp:
-                staged = Path(tmp) / f"{display}{p.suffix}"
-                staged.write_bytes(p.read_bytes())
+                staged = Path(tmp).resolve() / f"{display}{p.suffix.lower()}"
+                fd = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(fd, "wb") as stream:
+                    stream.write(data)
                 self._upload_via_rmapi(staged, parent)
         return {"name": display, "path": str(p)}
 

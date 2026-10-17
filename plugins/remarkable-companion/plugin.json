@@ -1,0 +1,32 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "remarkable-companion",
+  "version": "0.2.1",
+  "description": "Read selected reMarkable notebooks, review page changes, and post new documents through the existing rmk bridge.",
+  "author": {
+    "name": "Suman"
+  },
+  "keywords": [
+    "remarkable",
+    "handwriting",
+    "notebooks",
+    "documents"
+  ],
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "reMarkable Companion",
+        "shortDescription": "Your notes, connected",
+        "longDescription": "Review new and edited notebook pages, read handwriting with page references, and send useful briefs, worksheets, PDFs, or EPUBs to reMarkable. Uses the existing rmk connection on your Mac.",
+        "developerName": "Suman",
+        "category": "Productivity",
+        "capabilities": [],
+        "defaultPrompt": [
+          "What has changed in my reMarkable notes since the last review?",
+          "Read my selected notebook and summarize decisions and open questions.",
+          "Prepare a one-page brief and send it to my reMarkable."
+        ]
+      }
+    }
+  }
+}

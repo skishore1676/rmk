@@ -1,0 +1,4 @@
+interface:
+  display_name: "reMarkable Companion"
+  short_description: "Read changed notes and send documents to reMarkable"
+  default_prompt: "Use $remarkable-companion to review my changed notes and prepare a useful document for reMarkable."

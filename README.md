@@ -1,5 +1,51 @@
 # rmk — a reMarkable ↔ LLM bridge
 
+Read your reMarkable notes in Codex, track changes, and send useful documents
+back to the tablet. The existing command-line and Broker intake workflows
+remain available.
+
+## reMarkable Companion for Codex
+
+The private plugin connects Codex to the Mac's existing `rmk` configuration:
+
+- **Review changes:** identify added, edited, and removed notebook pages,
+  including edits to older pages, using a separate reader checkpoint.
+- **Read handwriting:** return page images from an exact revision and continue
+  through all tiles of a long page. Codex interprets the images directly.
+- **Read annotated PDFs:** combine supported v6 handwriting and highlights with
+  their mapped original PDF pages, including inserted pages and margin notes.
+  Report annotation, background and page-mapping changes separately.
+- **Send documents:** prepare a PDF brief or stage an existing PDF/EPUB, then
+  post a new document with a durable request ID and an upload receipt.
+
+Build the portable plugin with Python 3.11 or later:
+
+```bash
+python scripts/build_plugin.py
+```
+
+This produces `dist/remarkable-companion.zip`, containing the manifests,
+workflow skill, setup guide, and a standalone Python runtime. The archive
+contains source code only; runtime configuration, credentials, notebook
+captures, and installed dependencies stay on their existing host. Its server
+does not require `agent-broker` or another model-provider login.
+
+Follow the [Companion setup and tool guide](docs/companion-plugin.md) to install
+locally, select notebooks, and verify a complete read-and-post cycle. Local
+stdio is the default; optional authenticated HTTP binds to loopback. Connecting
+web chat or Pex requires a separately verified connection to the Mac. Hosts that
+support stdio can use an existing SSH launcher; preserve its configuration when
+upgrading the server.
+
+Version 0.2 reads supported handwritten notebooks and annotated PDFs from the
+desktop app's local source. See the [PDF upgrade guide](docs/pdf-annotation-upgrade.md)
+for existing installations and the tool guide for supported layouts. EPUB
+reading, editing native notebook content, and inserting pages into an existing
+notebook are outside its scope. Cloud upload readback
+and physical tablet sync are reported separately; tablet freshness is unknown.
+
+## Existing command-line workflow
+
 Pull a handwritten note off your reMarkable and push it to Claude for a summary
 or a flow diagram — all from the command line.
 
@@ -16,8 +62,8 @@ Inspired by [ghostwriter](https://github.com/awwaiid/ghostwriter) and
 e-ink screen on-device, `rmk` is a plain scriptable bridge: the note comes to
 your laptop and the answer prints to your terminal.
 
-The "brain" is [agent-broker](https://github.com/skishore1676/agent-broker) —
-rmk never calls a model provider directly. It hands the note to the broker,
+The CLI model commands use [agent-broker](https://github.com/skishore1676/agent-broker).
+They never call a model provider directly. They hand the note to the broker,
 which owns provider selection / failover / receipts and runs the logged-in
 `claude` CLI (so there's **no API key to manage** — just Claude Code auth).
 
@@ -43,7 +89,7 @@ which owns provider selection / failover / receipts and runs the logged-in
    `AgentTask` (raw-prompt passthrough). The broker's `claude` provider views
    the images with its Read tool and returns a summary / Mermaid diagram / answer.
 
-## Setup
+## Command-line setup
 
 You need the [agent-broker](https://github.com/skishore1676/agent-broker) repo
 checked out **next to this one** (`../agent-broker`) and the `claude` CLI logged
@@ -52,10 +98,14 @@ in:
 ```bash
 uv sync              # installs rmk + agent-broker (editable, from ../agent-broker)
 claude auth status   # should show loggedIn: true — that's the LLM auth
-uv run rmk init      # writes ~/.config/rmk/config.toml
+uv run rmk init      # writes to the platform's rmk configuration directory
 ```
 
 Then pick a source in the config's `[remarkable]` section:
+
+`Config.load()` resolves the configuration through `platformdirs`: normally
+`~/Library/Application Support/rmk/config.toml` on macOS and
+`~/.config/rmk/config.toml` on Linux. Preserve the Mac's existing source settings.
 
 **A) The desktop app (no tablet — recommended, and the tested path).** If you run
 the reMarkable desktop app, it keeps a synced copy of your notebooks locally:
@@ -103,7 +153,8 @@ rmk cloud-status                     # check the connection
 rmk push day-page.pdf --name "The Daily Suman"
 ```
 
-Tokens live in `~/.config/rmk/cloud-tokens.json` (0600), never in the repo.
+Tokens live in `cloud-tokens.json` under the platform's `rmk` configuration
+directory (0600), never in the repo.
 The code can only be used once — get a fresh one for each machine.
 
 Uploads go through the maintained [ddvk/rmapi](https://github.com/ddvk/rmapi)
@@ -194,19 +245,24 @@ snapshot of the official app and cannot prove an unobserved change-and-revert.
 See [milestone 1 verification](docs/milestone-1.md) for synthetic and real evidence.
 See [reading and project intake](docs/planning-intake.md) for the approved model-call path and publication checks.
 
-## Status & limits (v1)
+## Status & limits
 
-- **Read-only** on the tablet — `rmk` never writes to your device.
-- **Handwritten notebooks** are the target. Notes annotated *on top of a PDF/EPUB*
-  render only the ink layer today (the background PDF is not merged in).
-- Very long notebooks are capped at the first 20 pages per broker call (with a
-  warning) to keep payloads reasonable.
-- Transport is `local` (desktop-app store) or `ssh` (tablet); the cloud path is
-  stubbed for later.
+- **Notebook source access is read-only.** Cloud upload creates new PDF/EPUB
+  documents. Native notebook edits and overwrites are not provided by the plugin.
+- **Handwritten notebooks** are the plugin's supported input. It rejects
+  PDF/EPUB reading; the legacy CLI renderer can render only their ink layer
+  (the document background is not merged in).
+- The existing Broker commands cap a single model call at the first 20 pages
+  with a warning. The plugin exposes complete captured pages through explicit
+  tile continuation.
+- The CLI supports `local` (desktop-app store) and `ssh` (tablet) reads; the
+  interactive plugin requires the configured local desktop source. Uploads use
+  the separately registered `rmapi` cloud connection.
 - Rendering is pure-Python (`.rm`→SVG via `rmc`, →PDF via `svglib`/`reportlab`,
   →PNG via `pypdfium2`) — no Inkscape or Cairo system deps.
-- Depends on a sibling `../agent-broker` checkout (path dependency), so the
-  public repo isn't `pip install`-able standalone — it's wired to Suman's brain.
+- The source checkout's model commands depend on a sibling `../agent-broker`
+  checkout. The packaged plugin runtime installs independently and does not
+  invoke that Broker.
 
 ## Development
 

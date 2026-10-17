@@ -4,6 +4,7 @@ __pycache__/
 .venv/
 *.egg-info/
 .pytest_cache/
+dist/
 
 # rmk outputs / scratch
 *.pdf
