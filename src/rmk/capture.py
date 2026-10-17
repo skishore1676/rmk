@@ -217,7 +217,8 @@ class CaptureStore:
             if state and state["revision"] == revision:
                 snapshot.verify(self.transport, self.root)
                 return {"revision": revision, "observed_at": observed_at, "unchanged": True,
-                        "changes": changes(prior, prior), "artifact": self.status()["artifact"]}
+                        "changes": changes(prior, prior),
+                        "artifact": str(self.directory / "revisions" / revision)}
             revisions = self.directory / "revisions"
             _private_dir(revisions)
             target = revisions / revision
